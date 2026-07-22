@@ -1,0 +1,50 @@
+{
+  "mcp_servers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/Users/vladislavmogilnyj/ai-agent-switch/docs"
+      ],
+      "transport": "stdio",
+      "enabled": true
+    },
+    "switch-diag": {
+      "command": "/Users/vladislavmogilnyj/ai-agent-switch/.venv/bin/python",
+      "args": [
+        "src/mcp_servers/switch_diag.py"
+      ],
+      "transport": "stdio",
+      "enabled": true
+    },
+    "mikrotik-diag": {
+      "command": "/Users/vladislavmogilnyj/ai-agent-switch/.venv/bin/python",
+      "args": [
+        "src/mcp_servers/mikrotik_diag.py"
+      ],
+      "transport": "stdio",
+      "enabled": true
+    },
+    "memory-manager": {
+      "command": "/Users/vladislavmogilnyj/ai-agent-switch/.venv/bin/python",
+      "args": [
+        "src/mcp_servers/memory_manager.py"
+      ],
+      "transport": "stdio",
+      "enabled": true
+    },
+    "pdf-reader": {
+      "command": "/Users/vladislavmogilnyj/ai-agent-switch/.venv/bin/python",
+      "args": [
+        "src/mcp_servers/pdf_reader.py"
+      ],
+      "transport": "stdio",
+      "enabled": true
+    }
+  },
+  "settings": {
+    "auto_reload": false,
+    "log_level": "info"
+  }
+}

@@ -1,0 +1,17 @@
+fastapi>=0.115.0
+uvicorn>=0.30.6
+websockets>=13.0
+python-dotenv>=1.0.1
+langchain>=0.3.0
+langchain-openai>=0.2.0
+langchain-mcp-adapters>=0.0.3
+langchain-community>=0.3.0
+langchain-chroma>=0.1.0
+langchain-huggingface>=0.0.3
+sentence-transformers>=2.2.2
+mcp>=1.2.1
+netmiko>=4.4.0
+pymupdf>=1.24.10
+pytesseract>=0.3.13
+Pillow>=10.4.0
+httpx>=0.27.0

@@ -1,0 +1,30 @@
+services:
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-agent-switch:latest
+    container_name: ai-agent-switch
+    ports:
+      - "${PORT:-8000}:8000"
+    env_file:
+      - .env
+    environment:
+      - DOCS_DIR=/app/docs
+      - PORT=8000
+    volumes:
+      - chroma_db:/app/chroma_db
+      - docs:/app/docs
+      - agent_memory:/app/.agent_memory.json
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  chroma_db:
+  docs:
+  agent_memory:

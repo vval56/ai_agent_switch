@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+.env
+.agent_memory.json
+*.log
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Project data
+chroma_db/
+docs/*.pdf
+docs/*.doc
+docs/*.zip
+workspace/
+tmp/
+
+# Docker
+docker-compose.override.yml
+
+# Monitoring
+switch_debug_session.log
+
+# Tests
+test_*.py
+skills-lock.json
+
+# Kilo agent config
+.kilo/

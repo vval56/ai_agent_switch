@@ -1,0 +1,1495 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Network Agent</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #ffffff;
+            --bg-secondary: #f8f9fb;
+            --bg-tertiary: #f1f3f7;
+            --sidebar-bg: #ffffff;
+            --border: #e5e7eb;
+            --border-hover: #d1d5db;
+            --primary: #4f46e5;
+            --primary-hover: #4338ca;
+            --primary-light: #eef2ff;
+            --danger: #ef4444;
+            --danger-light: #fef2f2;
+            --success: #16a34a;
+            --success-light: #f0fdf4;
+            --warning: #d97706;
+            --warning-light: #fffbeb;
+            --text: #111827;
+            --text-secondary: #4b5563;
+            --text-muted: #9ca3af;
+            --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+            --shadow: 0 1px 3px rgba(0,0,0,0.1), 0 1px 2px rgba(0,0,0,0.06);
+            --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -1px rgba(0,0,0,0.06);
+            --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -2px rgba(0,0,0,0.05);
+            --radius: 12px;
+            --radius-sm: 8px;
+            --radius-xs: 6px;
+            --transition: all 0.15s ease;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            display: flex;
+            height: 100vh;
+            background: var(--bg);
+            color: var(--text);
+            overflow: hidden;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 5px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+
+        /* Sidebar */
+        .sidebar {
+            width: 340px;
+            min-width: 340px;
+            background: var(--sidebar-bg);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            z-index: 10;
+        }
+
+        .sidebar-header {
+            padding: 22px 24px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .sidebar-header h2 {
+            font-size: 17px;
+            font-weight: 700;
+            margin-bottom: 14px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--text);
+            letter-spacing: -0.3px;
+        }
+
+        .btn {
+            padding: 9px 16px;
+            border: none;
+            border-radius: var(--radius-xs);
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            transition: var(--transition);
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            font-family: inherit;
+            line-height: 1.4;
+        }
+
+        .btn-primary {
+            background: var(--primary);
+            color: white;
+            width: 100%;
+        }
+
+        .btn-primary:hover {
+            background: var(--primary-hover);
+        }
+
+        .btn-primary:active {
+            transform: scale(0.98);
+        }
+
+        .btn-danger {
+            background: transparent;
+            color: var(--danger);
+            border: 1px solid transparent;
+            padding: 4px 8px;
+            font-size: 14px;
+            line-height: 1;
+            border-radius: 4px;
+        }
+
+        .btn-danger:hover {
+            background: var(--danger-light);
+        }
+
+        .btn-small {
+            padding: 3px 8px;
+            font-size: 11px;
+        }
+
+        .btn-ghost {
+            background: transparent;
+            color: var(--text-secondary);
+            border: 1px solid var(--border);
+        }
+
+        .btn-ghost:hover {
+            background: var(--bg-tertiary);
+            color: var(--text);
+        }
+
+        .device-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 12px;
+        }
+
+        .device-item {
+            padding: 12px 14px;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            margin-bottom: 6px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: var(--transition);
+            border: 1.5px solid transparent;
+            background: var(--bg-secondary);
+        }
+
+        .device-item:hover {
+            background: var(--bg-tertiary);
+            border-color: var(--border-hover);
+        }
+
+        .device-item.active {
+            background: var(--primary-light);
+            border-color: var(--primary);
+        }
+
+        .device-info { flex: 1; min-width: 0; }
+
+        .device-name {
+            font-weight: 600;
+            font-size: 13.5px;
+            color: var(--text);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .device-meta {
+            font-size: 11.5px;
+            color: var(--text-muted);
+            margin-top: 3px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .device-badge {
+            font-size: 10px;
+            padding: 1px 6px;
+            border-radius: 4px;
+            background: var(--bg-tertiary);
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+
+        .section {
+            padding: 14px;
+            border-top: 1px solid var(--border);
+            background: var(--bg-secondary);
+        }
+
+        .section-title {
+            font-size: 10.5px;
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+            color: var(--text-muted);
+            margin-bottom: 10px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .doc-item {
+            font-size: 12.5px;
+            color: var(--text-secondary);
+            padding: 7px 10px;
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            border-radius: var(--radius-xs);
+            background: var(--bg);
+            margin-bottom: 4px;
+            border: 1px solid var(--border);
+        }
+
+        .doc-item .doc-chunks {
+            margin-left: auto;
+            font-size: 10.5px;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .policy-item {
+            font-size: 12px;
+            color: var(--text-secondary);
+            padding: 6px 10px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-radius: var(--radius-xs);
+            background: var(--bg);
+            margin-bottom: 4px;
+            border: 1px solid var(--border);
+        }
+
+        /* Main chat area */
+        .main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+        }
+
+        .chat-header {
+            padding: 16px 24px;
+            background: var(--bg);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .chat-header-left {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+
+        .chat-header h3 {
+            font-size: 16px;
+            font-weight: 650;
+            letter-spacing: -0.2px;
+        }
+
+        .badge {
+            font-size: 11px;
+            background: var(--primary-light);
+            color: var(--primary);
+            padding: 3px 10px;
+            border-radius: 20px;
+            font-weight: 600;
+        }
+
+        .connection-status {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 11.5px;
+            color: var(--text-muted);
+        }
+
+        .connection-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: var(--danger);
+            transition: var(--transition);
+        }
+
+        .connection-dot.connected {
+            background: var(--success);
+        }
+
+        /* File upload */
+        .upload-area {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .file-upload {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .file-upload input[type="file"] { display: none; }
+
+        .file-label {
+            padding: 6px 12px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-xs);
+            cursor: pointer;
+            font-size: 12.5px;
+            transition: var(--transition);
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+
+        .file-label:hover {
+            background: var(--bg-tertiary);
+            border-color: var(--border-hover);
+            color: var(--text);
+        }
+
+        #file-status {
+            font-size: 11.5px;
+            color: var(--text-muted);
+            max-width: 160px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        #file-status.success { color: var(--success); }
+        #file-status.error { color: var(--danger); }
+        #file-status.loading { color: var(--warning); }
+
+        /* Chat */
+        #chat {
+            flex: 1;
+            overflow-y: auto;
+            padding: 24px;
+            scroll-behavior: smooth;
+            background: var(--bg);
+        }
+
+        .message {
+            margin-bottom: 18px;
+            padding: 14px 18px;
+            border-radius: var(--radius);
+            max-width: 78%;
+            line-height: 1.65;
+            animation: fadeIn 0.2s ease;
+            position: relative;
+            word-wrap: break-word;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .user {
+            background: var(--primary);
+            color: white;
+            margin-left: auto;
+            text-align: right;
+            border-bottom-right-radius: 8px;
+        }
+
+        .assistant {
+            background: var(--bg-secondary);
+            color: var(--text);
+            margin-right: auto;
+            border: 1px solid var(--border);
+            border-bottom-left-radius: 8px;
+        }
+
+        .system {
+            background: var(--warning-light);
+            color: var(--warning);
+            text-align: center;
+            max-width: 100%;
+            font-size: 12.5px;
+            padding: 8px 16px;
+            border-radius: var(--radius-xs);
+            border: 1px solid #fde68a;
+            font-weight: 500;
+        }
+
+        /* Copy button */
+        .copy-btn {
+            position: absolute;
+            top: 6px;
+            right: 6px;
+            background: transparent;
+            border: 1px solid transparent;
+            color: var(--text-muted);
+            padding: 3px 6px;
+            border-radius: 4px;
+            font-size: 11px;
+            cursor: pointer;
+            opacity: 0;
+            transition: var(--transition);
+        }
+
+        .assistant:hover .copy-btn,
+        .user:hover .copy-btn {
+            opacity: 1;
+        }
+
+        .copy-btn:hover {
+            background: var(--bg-tertiary);
+            color: var(--text);
+        }
+
+        /* Markdown */
+        .message.assistant h1, .message.assistant h2, .message.assistant h3 {
+            margin: 14px 0 8px;
+            font-weight: 650;
+            color: var(--text);
+            letter-spacing: -0.2px;
+        }
+
+        .message.assistant h1:first-child, .message.assistant h2:first-child, .message.assistant h3:first-child {
+            margin-top: 0;
+        }
+
+        .message.assistant p { margin: 6px 0; }
+
+        .message.assistant ul, .message.assistant ol {
+            margin: 8px 0;
+            padding-left: 20px;
+        }
+
+        .message.assistant li { margin: 4px 0; }
+
+        .message.assistant table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 10px 0;
+            font-size: 12.5px;
+        }
+
+        .message.assistant th, .message.assistant td {
+            border: 1px solid var(--border);
+            padding: 8px 12px;
+            text-align: left;
+        }
+
+        .message.assistant th {
+            background: var(--bg-tertiary);
+            font-weight: 600;
+        }
+
+        .message.assistant code {
+            background: var(--bg-tertiary);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            font-size: 12px;
+            color: var(--primary);
+        }
+
+        .message.assistant pre {
+            background: #1e1e2e;
+            color: #cdd6f4;
+            padding: 14px;
+            border-radius: var(--radius-sm);
+            overflow-x: auto;
+            margin: 10px 0;
+        }
+
+        .message.assistant pre code {
+            background: none;
+            padding: 0;
+            color: inherit;
+        }
+
+        .message.assistant blockquote {
+            border-left: 3px solid var(--primary);
+            padding-left: 14px;
+            margin: 10px 0;
+            color: var(--text-secondary);
+            font-style: italic;
+        }
+
+        /* Input area */
+        .input-area {
+            display: flex;
+            gap: 10px;
+            padding: 16px 24px;
+            background: var(--bg);
+            border-top: 1px solid var(--border);
+        }
+
+        textarea {
+            flex: 1;
+            padding: 10px 14px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            resize: none;
+            height: 44px;
+            font-family: inherit;
+            font-size: 13.5px;
+            transition: var(--transition);
+            background: var(--bg-secondary);
+            color: var(--text);
+        }
+
+        textarea:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
+            background: var(--bg);
+        }
+
+        textarea::placeholder {
+            color: var(--text-muted);
+        }
+
+        .input-area .btn-primary {
+            width: auto;
+            min-width: 80px;
+            padding: 10px 20px;
+            height: 44px;
+        }
+
+        /* Empty state */
+        .empty-state {
+            text-align: center;
+            padding: 50px 20px;
+            color: var(--text-muted);
+        }
+
+        .empty-state h3 {
+            font-size: 18px;
+            margin-bottom: 8px;
+            color: var(--text-secondary);
+            font-weight: 600;
+        }
+
+        .empty-state p {
+            font-size: 13px;
+        }
+
+        /* Drop zone overlay */
+        .drop-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(255,255,255,0.92);
+            backdrop-filter: blur(12px);
+            z-index: 999;
+            justify-content: center;
+            align-items: center;
+            border: 2.5px dashed var(--primary);
+            margin: 12px;
+            border-radius: var(--radius);
+            pointer-events: none;
+        }
+
+        .drop-overlay.active {
+            display: flex;
+        }
+
+        .drop-overlay-content {
+            text-align: center;
+            color: var(--primary);
+        }
+
+        .drop-overlay-content h2 {
+            font-size: 24px;
+            margin-bottom: 6px;
+            font-weight: 700;
+        }
+
+        .drop-overlay-content p {
+            font-size: 14px;
+            color: var(--text-secondary);
+        }
+
+        /* Modal */
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.35);
+            backdrop-filter: blur(4px);
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            opacity: 0;
+            transition: opacity 0.2s ease;
+        }
+
+        .modal.active {
+            display: flex;
+            opacity: 1;
+        }
+
+        .modal-content {
+            background: var(--bg);
+            padding: 26px;
+            border-radius: var(--radius);
+            width: 440px;
+            max-width: 92%;
+            box-shadow: var(--shadow-lg);
+            transform: scale(0.96);
+            transition: transform 0.2s ease;
+            border: 1px solid var(--border);
+        }
+
+        .modal.active .modal-content {
+            transform: scale(1);
+        }
+
+        .modal-content h3 {
+            margin-bottom: 20px;
+            font-size: 18px;
+            font-weight: 700;
+            letter-spacing: -0.3px;
+        }
+
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        .form-group label {
+            display: block;
+            font-size: 12.5px;
+            margin-bottom: 6px;
+            font-weight: 500;
+            color: var(--text-secondary);
+        }
+
+        .form-group input, .form-group select {
+            width: 100%;
+            padding: 9px 12px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-xs);
+            font-size: 13.5px;
+            transition: var(--transition);
+            background: var(--bg);
+            color: var(--text);
+            font-family: inherit;
+        }
+
+        .form-group input:focus, .form-group select:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
+        }
+
+        .form-actions {
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+            margin-top: 22px;
+        }
+
+        /* Toast notifications */
+        .toast-container {
+            position: fixed;
+            top: 16px;
+            right: 16px;
+            z-index: 2000;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .toast {
+            padding: 10px 16px;
+            border-radius: var(--radius-xs);
+            font-size: 12.5px;
+            font-weight: 500;
+            animation: slideIn 0.25s ease, fadeOut 0.25s ease 3.5s;
+            box-shadow: var(--shadow-md);
+            max-width: 340px;
+        }
+
+        .toast.success {
+            background: var(--success-light);
+            color: var(--success);
+            border: 1px solid #bbf7d0;
+        }
+
+        .toast.error {
+            background: var(--danger-light);
+            color: var(--danger);
+            border: 1px solid #fecaca;
+        }
+
+        .toast.info {
+            background: var(--primary-light);
+            color: var(--primary);
+            border: 1px solid #c7d2fe;
+        }
+
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+
+        @keyframes fadeOut {
+            from { opacity: 1; }
+            to { opacity: 0; }
+        }
+
+        /* Mobile responsive */
+        .mobile-menu-btn {
+            display: none;
+            background: transparent;
+            border: none;
+            color: var(--text);
+            font-size: 22px;
+            cursor: pointer;
+            padding: 2px;
+            line-height: 1;
+        }
+
+        @media (max-width: 768px) {
+            .sidebar {
+                position: fixed;
+                left: -340px;
+                top: 0;
+                height: 100%;
+                z-index: 100;
+                box-shadow: var(--shadow-lg);
+            }
+
+            .sidebar.open {
+                left: 0;
+            }
+
+            .mobile-menu-btn {
+                display: block;
+            }
+
+            .message {
+                max-width: 90%;
+            }
+
+            .chat-header {
+                padding: 12px 16px;
+            }
+
+            .input-area {
+                padding: 12px 16px;
+            }
+
+            #chat {
+                padding: 16px;
+            }
+        }
+
+        /* Indexing status */
+        .indexing-status {
+            display: none;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 12px;
+            background: var(--warning-light);
+            border: 1px solid #fde68a;
+            border-radius: var(--radius-xs);
+            margin-top: 10px;
+            font-size: 12px;
+            color: var(--warning);
+            font-weight: 500;
+        }
+
+        .indexing-status.active {
+            display: flex;
+        }
+
+        .indexing-status .spinner {
+            width: 14px;
+            height: 14px;
+            border: 2px solid var(--warning);
+            border-top-color: transparent;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <!-- Drop overlay for drag & drop -->
+    <div class="drop-overlay" id="dropOverlay">
+        <div class="drop-overlay-content">
+            <h2>📄 Перетащите PDF файл</h2>
+            <p>Загрузится и проиндексируется автоматически</p>
+        </div>
+    </div>
+
+    <!-- Toast notifications -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- Sidebar -->
+    <div class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <h2>📡 Коммутаторы</h2>
+            <button class="btn btn-primary" onclick="openModal('addDeviceModal')">+ Добавить устройство</button>
+        </div>
+        <div class="device-list" id="deviceList">
+            <div class="empty-state">
+                <p>Нет устройств. Добавьте первый коммутатор.</p>
+            </div>
+        </div>
+        <div class="section">
+            <div class="section-title">📚 База знаний</div>
+            <div id="docList"><div class="doc-item">Загрузка...</div></div>
+            <div class="indexing-status" id="indexingStatus">
+                <div class="spinner"></div>
+                <span>Индексация PDF...</span>
+            </div>
+        </div>
+        <div class="section">
+            <div class="section-title">🔒 Политика команд</div>
+            <div id="policyList"><div class="doc-item">Загрузка...</div></div>
+            <button class="btn btn-primary" onclick="openModal('policyModal')" style="margin-top:10px;">+ Добавить политику</button>
+        </div>
+    </div>
+
+    <!-- Main -->
+    <div class="main">
+        <div class="chat-header">
+            <div class="chat-header-left">
+                <button class="mobile-menu-btn" onclick="toggleSidebar()">☰</button>
+                <h3 id="chatTitle">Выберите коммутатор</h3>
+                <span class="badge" id="chatBadge" style="display:none;"></span>
+            </div>
+            <div class="upload-area">
+                <div class="connection-status">
+                    <div class="connection-dot" id="connectionDot"></div>
+                    <span id="connectionText">Отключено</span>
+                </div>
+                <div class="file-upload">
+                    <label for="pdf-file" class="file-label">📎 PDF</label>
+                    <input type="file" id="pdf-file" accept=".pdf" onchange="uploadFile()">
+                    <span id="file-status"></span>
+                </div>
+            </div>
+        </div>
+        <div id="chat">
+            <div class="empty-state">
+                <h3>👈 Выберите коммутатор</h3>
+                <p>или добавьте новый из боковой панели</p>
+            </div>
+        </div>
+        <div class="input-area">
+            <textarea id="user-input" placeholder="Например: настрой VLAN 10 или покажи конфигурацию..." onkeydown="handleKeyDown(event)"></textarea>
+            <button class="btn btn-primary" onclick="sendMessage()" id="send-btn">Отправить</button>
+        </div>
+    </div>
+
+    <!-- Add Device Modal -->
+    <div class="modal" id="addDeviceModal">
+        <div class="modal-content">
+            <h3>Добавить коммутатор</h3>
+            <div class="form-group">
+                <label>Имя</label>
+                <input type="text" id="devName" placeholder="Office-Switch-01">
+            </div>
+            <div class="form-group">
+                <label>IP адрес</label>
+                <input type="text" id="devIp" placeholder="192.168.1.1">
+            </div>
+            <div class="form-group">
+                <label>Логин</label>
+                <input type="text" id="devUser" placeholder="admin">
+            </div>
+            <div class="form-group">
+                <label>Пароль</label>
+                <input type="password" id="devPass" placeholder="••••••">
+            </div>
+            <div class="form-group">
+                <label>Тип устройства</label>
+                <select id="devType">
+                    <option value="zyxel_os">Zyxel/Cudy (ZyNOS)</option>
+                    <option value="cisco_ios">Cisco IOS</option>
+                    <option value="mikrotik_routeros">MikroTik RouterOS</option>
+                    <option value="mikrotik_routeros_v7">MikroTik RouterOS v7</option>
+                </select>
+            </div>
+            <div class="form-actions">
+                <button class="btn btn-ghost" onclick="closeModal('addDeviceModal')">Отмена</button>
+                <button class="btn btn-primary" onclick="addDevice()">Добавить</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Policy Modal -->
+    <div class="modal" id="policyModal">
+        <div class="modal-content">
+            <h3 id="policyModalTitle">Добавить политику</h3>
+            <div class="form-group">
+                <label>Ключ (IP устройства или "default")</label>
+                <input type="text" id="policyKey" placeholder="192.168.1.1 или default">
+            </div>
+            <div class="form-group">
+                <label>Разрешённые префиксы (через запятую)</label>
+                <input type="text" id="policyReadonly" placeholder="show, display, get, ping">
+            </div>
+            <div class="form-group">
+                <label>Заблокированные паттерны (через запятую)</label>
+                <input type="text" id="policyBlocked" placeholder="erase, delete, reload, reset">
+            </div>
+            <div class="form-actions">
+                <button class="btn btn-ghost" onclick="closeModal('policyModal')">Отмена</button>
+                <button class="btn btn-primary" onclick="savePolicy()">Сохранить</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // State
+        const state = {
+            ws: null,
+            devices: [],
+            activeDeviceId: null,
+            chatHistories: {},
+            pendingRequests: {},
+            requestCounter: 0,
+            isReconnecting: false,
+            isProcessing: false
+        };
+
+        // Toast notifications
+        function showToast(message, type = 'info') {
+            const container = document.getElementById('toastContainer');
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            toast.textContent = message;
+            container.appendChild(toast);
+            setTimeout(() => toast.remove(), 4000);
+        }
+
+        // WebSocket
+        function connect() {
+            if (state.ws && state.ws.readyState === WebSocket.OPEN) return;
+
+            state.ws = new WebSocket(`ws://${window.location.host}/ws`);
+            state.ws.onopen = () => {
+                state.isReconnecting = false;
+                updateConnectionStatus(true);
+                loadDevices();
+                if (!document.querySelector('.system')) {
+                    addMessage('system', '✅ Подключено к агенту');
+                }
+            };
+            state.ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    handleWsMessage(data);
+                } catch (e) {
+                    console.error('WS parse error:', e);
+                }
+            };
+            state.ws.onclose = () => {
+                updateConnectionStatus(false);
+                if (!state.isReconnecting) {
+                    state.isReconnecting = true;
+                    showToast('⚠️ Соединение разорвано. Переподключение...', 'info');
+                    setTimeout(() => {
+                        state.isReconnecting = false;
+                        connect();
+                    }, 3000);
+                }
+            };
+            state.ws.onerror = (error) => {
+                console.error('WS error:', error);
+            };
+        }
+
+        // Загрузка истории чатов для всех устройств
+        async function loadAllChatHistories() {
+            try {
+                const res = await fetch('/api/devices');
+                const devices = await res.json();
+                for (const dev of devices) {
+                    const devId = dev.id || dev.ip;
+                    try {
+                        const histRes = await fetch(`/api/chat_history/${devId}`);
+                        const histData = await histRes.json();
+                        if (histData.messages && histData.messages.length > 0) {
+                            state.chatHistories[devId] = histData.messages;
+                        }
+                    } catch (e) {
+                        console.error(`Failed to load history for ${devId}`, e);
+                    }
+                }
+            } catch (e) {
+                console.error('Failed to load devices for history', e);
+            }
+        }
+
+        function handleWsMessage(data) {
+            if (data.type === 'thinking_start') {
+                addMessage('system', '⏳ Агент обрабатывает запрос...');
+                document.getElementById('send-btn').disabled = true;
+                state.isProcessing = true;
+            } else if (data.type === 'thinking_end') {
+                document.querySelectorAll('.system').forEach(el => {
+                    if (el.textContent.includes('обрабатывает')) el.remove();
+                });
+                const reqDeviceId = data.device_id || state.pendingRequests[data.request_id] || state.activeDeviceId;
+                if (reqDeviceId) {
+                    const history = state.chatHistories[reqDeviceId] || [];
+                    history.push({ role: 'assistant', content: data.final });
+                    state.chatHistories[reqDeviceId] = history;
+                    if (reqDeviceId === state.activeDeviceId) {
+                        addMessage('assistant', data.final);
+                    } else {
+                        const devName = (state.devices.find(d => d.id === reqDeviceId) || {}).name || reqDeviceId;
+                        showToast(`💬 Ответ для: ${devName}`, 'info');
+                    }
+                } else if (state.activeDeviceId) {
+                    addMessage('assistant', data.final);
+                }
+                if (data.request_id && state.pendingRequests[data.request_id]) {
+                    delete state.pendingRequests[data.request_id];
+                }
+                document.getElementById('send-btn').disabled = false;
+                state.isProcessing = false;
+            } else if (data.type === 'error') {
+                addMessage('system', '❌ ' + data.message);
+                showToast('❌ ' + data.message, 'error');
+                document.getElementById('send-btn').disabled = false;
+                state.isProcessing = false;
+            } else if (data.type === 'connected') {
+                showToast(`🚀 Агент готов. Инструментов: ${data.tools}`, 'success');
+                state.isProcessing = false;
+            }
+        }
+
+        function updateConnectionStatus(connected) {
+            const dot = document.getElementById('connectionDot');
+            const text = document.getElementById('connectionText');
+            if (connected) {
+                dot.classList.add('connected');
+                text.textContent = 'Подключено';
+                text.style.color = 'var(--success)';
+            } else {
+                dot.classList.remove('connected');
+                text.textContent = 'Отключено';
+                text.style.color = 'var(--text-muted)';
+            }
+        }
+
+        // Messages
+        function addMessage(role, text) {
+            const chat = document.getElementById('chat');
+            const div = document.createElement('div');
+            div.className = `message ${role}`;
+            
+            if (role === 'user' || role === 'assistant') {
+                const copyBtn = document.createElement('button');
+                copyBtn.className = 'copy-btn';
+                copyBtn.textContent = '📋';
+                copyBtn.title = 'Копировать';
+                copyBtn.onclick = () => {
+                    navigator.clipboard.writeText(text).then(() => {
+                        copyBtn.textContent = '✓';
+                        setTimeout(() => copyBtn.textContent = '📋', 1500);
+                    });
+                };
+                div.appendChild(copyBtn);
+            }
+            
+            div.innerHTML += marked.parse(text);
+            chat.appendChild(div);
+            chat.scrollTop = chat.scrollHeight;
+        }
+
+        function sendMessage() {
+            const input = document.getElementById('user-input');
+            const text = input.value.trim();
+            if (!text || !state.activeDeviceId) {
+                if (!state.activeDeviceId) {
+                    showToast('⚠️ Выберите коммутатор', 'info');
+                }
+                return;
+            }
+            
+            // Проверяем состояние WS
+            if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+                showToast('⚠️ Переподключение... Сообщение будет отправлено', 'info');
+                // Пытаемся переподключиться
+                connect();
+                // Отправляем после переподключения
+                setTimeout(() => sendMessage(), 3500);
+                return;
+            }
+            
+            // Проверяем не идёт ли обработка
+            if (state.isProcessing) {
+                showToast('⚠️ Агент обрабатывает предыдущий запрос', 'info');
+                return;
+            }
+            
+            const requestId = 'req_' + (++state.requestCounter);
+            state.pendingRequests[requestId] = state.activeDeviceId;
+            addMessage('user', text);
+            const history = state.chatHistories[state.activeDeviceId] || [];
+            history.push({ role: 'user', content: text });
+            state.chatHistories[state.activeDeviceId] = history;
+            
+            state.ws.send(JSON.stringify({
+                message: text,
+                device_id: state.activeDeviceId,
+                request_id: requestId
+            }));
+            
+            input.value = '';
+            input.style.height = '44px';
+        }
+
+        function handleKeyDown(event) {
+            const textarea = event.target;
+            if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                sendMessage();
+            } else {
+                // Auto-resize textarea
+                setTimeout(() => {
+                    textarea.style.height = '44px';
+                    textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px';
+                }, 0);
+            }
+        }
+
+        // Devices
+        async function loadDevices() {
+            try {
+                const res = await fetch('/api/devices');
+                state.devices = await res.json();
+                renderDevices();
+            } catch (e) {
+                console.error('Failed to load devices', e);
+                showToast('❌ Ошибка загрузки устройств', 'error');
+            }
+            await loadDocuments();
+            await loadPolicies();
+        }
+
+        function renderDevices() {
+            const list = document.getElementById('deviceList');
+            if (state.devices.length === 0) {
+                list.innerHTML = '<div class="empty-state"><p>Нет устройств. Добавьте первый коммутатор.</p></div>';
+                return;
+            }
+            
+            list.innerHTML = '';
+            state.devices.forEach(dev => {
+                const div = document.createElement('div');
+                div.className = `device-item ${dev.id === state.activeDeviceId ? 'active' : ''}`;
+                div.onclick = () => switchDevice(dev.id || dev.ip);
+                div.innerHTML = `
+                    <div class="device-info">
+                        <div class="device-name">${dev.name || dev.ip}</div>
+                        <div class="device-meta">
+                            ${dev.ip}
+                            <span class="device-badge">${dev.device_type}</span>
+                        </div>
+                    </div>
+                    <button class="btn btn-danger btn-small" onclick="event.stopPropagation(); deleteDevice('${dev.id}')">×</button>
+                `;
+                list.appendChild(div);
+            });
+        }
+
+        function switchDevice(id) {
+            state.activeDeviceId = id;
+            const dev = state.devices.find(d => (d.id || d.ip) === id);
+            if (dev) {
+                document.getElementById('chatTitle').textContent = dev.name || dev.ip;
+                const badge = document.getElementById('chatBadge');
+                badge.textContent = dev.device_type;
+                badge.style.display = 'inline-block';
+                const chat = document.getElementById('chat');
+                chat.innerHTML = '';
+                const history = state.chatHistories[id] || [];
+                if (history.length > 0) {
+                    addMessage('system', `💬 Чат с ${dev.name || dev.ip} (${dev.device_type})`);
+                    history.forEach(msg => addMessage(msg.role, msg.content));
+                } else {
+                    addMessage('system', `💬 Чат с ${dev.name || dev.ip} (${dev.device_type})`);
+                }
+            }
+            renderDevices();
+            
+            // Close sidebar on mobile
+            if (window.innerWidth <= 768) {
+                document.getElementById('sidebar').classList.remove('open');
+            }
+        }
+
+        async function addDevice() {
+            const name = document.getElementById('devName').value.trim();
+            const ip = document.getElementById('devIp').value.trim();
+            const username = document.getElementById('devUser').value.trim();
+            const password = document.getElementById('devPass').value;
+            const device_type = document.getElementById('devType').value;
+            
+            if (!ip || !username || !password) {
+                showToast('⚠️ Заполните IP, логин и пароль', 'error');
+                return;
+            }
+            
+            try {
+                const res = await fetch('/api/devices', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, ip, username, password, device_type })
+                });
+                
+                if (res.ok) {
+                    closeModal('addDeviceModal');
+                    clearModalFields('addDeviceModal');
+                    await loadDevices();
+                    switchDevice(ip);
+                    showToast('✅ Устройство добавлено', 'success');
+                } else {
+                    showToast('❌ Ошибка добавления устройства', 'error');
+                }
+            } catch (e) {
+                showToast('❌ Ошибка сети', 'error');
+            }
+        }
+
+        async function deleteDevice(id) {
+            const dev = state.devices.find(d => (d.id || d.ip) === id);
+            if (!confirm(`Удалить "${dev?.name || id}"?`)) return;
+            
+            try {
+                await fetch(`/api/devices/${encodeURIComponent(id)}`, { method: 'DELETE' });
+                
+                if (state.activeDeviceId === id) {
+                    state.activeDeviceId = null;
+                    document.getElementById('chatTitle').textContent = 'Выберите коммутатор';
+                    document.getElementById('chatBadge').style.display = 'none';
+                    document.getElementById('chat').innerHTML = '<div class="empty-state"><h3>👈 Выберите коммутатор</h3><p>или добавьте новый</p></div>';
+                }
+                
+                await loadDevices();
+                showToast('🗑️ Устройство удалено', 'info');
+            } catch (e) {
+                showToast('❌ Ошибка удаления', 'error');
+            }
+        }
+
+        // Modals
+        function openModal(id) {
+            const modal = document.getElementById(id);
+            modal.classList.add('active');
+        }
+
+        function closeModal(id) {
+            const modal = document.getElementById(id);
+            modal.classList.remove('active');
+            clearModalFields(id);
+        }
+
+        function clearModalFields(modalId) {
+            const modal = document.getElementById(modalId);
+            modal.querySelectorAll('input').forEach(input => input.value = '');
+            if (modalId === 'policyModal') {
+                document.getElementById('policyModalTitle').textContent = 'Добавить политику';
+            }
+        }
+
+        // Close modal on overlay click
+        document.querySelectorAll('.modal').forEach(modal => {
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) {
+                    closeModal(modal.id);
+                }
+            });
+        });
+
+        // Upload
+        async function uploadFile() {
+            const fileInput = document.getElementById('pdf-file');
+            const status = document.getElementById('file-status');
+            const indexingStatus = document.getElementById('indexingStatus');
+            
+            if (!fileInput.files[0]) {
+                showToast('⚠️ Выберите файл!', 'info');
+                return;
+            }
+            
+            const file = fileInput.files[0];
+            status.textContent = '⏳ Загрузка...';
+            status.className = 'loading';
+            indexingStatus.classList.add('active');
+            
+            try {
+                const formData = new FormData();
+                formData.append('file', file);
+                
+                const response = await fetch('/api/upload', { method: 'POST', body: formData });
+                const result = await response.json();
+                
+                if (response.ok) {
+                    status.textContent = '✅ ' + result.message;
+                    status.className = 'success';
+                    indexingStatus.classList.remove('active');
+                    await loadDocuments();
+                    showToast('📄 PDF загружен и индексируется', 'success');
+                } else {
+                    status.textContent = '❌ ' + result.detail;
+                    status.className = 'error';
+                    indexingStatus.classList.remove('active');
+                    showToast('❌ Ошибка загрузки: ' + result.detail, 'error');
+                }
+            } catch (e) {
+                status.textContent = '❌ Ошибка сети';
+                status.className = 'error';
+                indexingStatus.classList.remove('active');
+                showToast('❌ Ошибка сети', 'error');
+            }
+            
+            fileInput.value = '';
+        }
+
+        // Documents
+        async function loadDocuments() {
+            try {
+                const res = await fetch('/api/documents');
+                const data = await res.json();
+                const docList = document.getElementById('docList');
+                if (data.documents && data.documents.length > 0) {
+                    docList.innerHTML = data.documents.map(d => 
+                        `<div class="doc-item">📄 ${d.name} <span class="doc-chunks">${d.chunks || 0} чанков</span></div>`
+                    ).join('');
+                } else {
+                    docList.innerHTML = '<div class="doc-item" style="color:var(--text-muted);">Нет загруженных PDF</div>';
+                }
+            } catch (e) {
+                console.error('Failed to load documents', e);
+            }
+        }
+
+        // Policies
+        async function loadPolicies() {
+            try {
+                const res = await fetch('/api/policies');
+                const policies = await res.json();
+                const list = document.getElementById('policyList');
+                const keys = Object.keys(policies);
+                if (keys.length === 0) {
+                    list.innerHTML = '<div class="doc-item" style="color:var(--text-muted);">Нет политик</div>';
+                    return;
+                }
+                list.innerHTML = keys.map(key => `
+                    <div class="policy-item">
+                        <span><strong>${key}</strong></span>
+                        <span>
+                            <button class="btn btn-danger btn-small" onclick="event.stopPropagation(); editPolicy('${key}')">✏️</button>
+                            <button class="btn btn-danger btn-small" onclick="event.stopPropagation(); deletePolicy('${key}')">×</button>
+                        </span>
+                    </div>
+                `).join('');
+            } catch (e) {
+                console.error('Failed to load policies', e);
+            }
+        }
+
+        async function savePolicy() {
+            const key = document.getElementById('policyKey').value.trim();
+            const readonly = document.getElementById('policyReadonly').value.split(',').map(s => s.trim()).filter(Boolean);
+            const blocked = document.getElementById('policyBlocked').value.split(',').map(s => s.trim()).filter(Boolean);
+            
+            if (!key) {
+                showToast('⚠️ Введите ключ', 'error');
+                return;
+            }
+            
+            try {
+                const res = await fetch(`/api/policies/${encodeURIComponent(key)}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ readonly_prefixes: readonly, blocked_patterns: blocked })
+                });
+                
+                if (res.ok) {
+                    closeModal('policyModal');
+                    await loadPolicies();
+                    showToast('✅ Политика сохранена', 'success');
+                } else {
+                    showToast('❌ Ошибка сохранения', 'error');
+                }
+            } catch (e) {
+                showToast('❌ Ошибка сети', 'error');
+            }
+        }
+
+        async function deletePolicy(key) {
+            if (!confirm(`Удалить политику "${key}"?`)) return;
+            try {
+                await fetch(`/api/policies/${encodeURIComponent(key)}`, { method: 'DELETE' });
+                await loadPolicies();
+                showToast('🗑️ Политика удалена', 'info');
+            } catch (e) {
+                showToast('❌ Ошибка удаления', 'error');
+            }
+        }
+
+        async function editPolicy(key) {
+            const res = await fetch(`/api/policies/${encodeURIComponent(key)}`);
+            const data = await res.json();
+            document.getElementById('policyKey').value = data.key;
+            document.getElementById('policyReadonly').value = (data.readonly_prefixes || []).join(', ');
+            document.getElementById('policyBlocked').value = (data.blocked_patterns || []).join(', ');
+            document.getElementById('policyModalTitle').textContent = 'Редактировать политику';
+            openModal('policyModal');
+        }
+
+        // Drag & Drop
+        let dragCounter = 0;
+
+        document.addEventListener('dragenter', (e) => {
+            e.preventDefault();
+            dragCounter++;
+            document.getElementById('dropOverlay').classList.add('active');
+        });
+
+        document.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            dragCounter--;
+            if (dragCounter === 0) {
+                document.getElementById('dropOverlay').classList.remove('active');
+            }
+        });
+
+        document.addEventListener('dragover', (e) => {
+            e.preventDefault();
+        });
+
+        document.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dragCounter = 0;
+            document.getElementById('dropOverlay').classList.remove('active');
+            
+            const files = e.dataTransfer.files;
+            if (files.length > 0 && files[0].name.endsWith('.pdf')) {
+                document.getElementById('pdf-file').files = files;
+                uploadFile();
+            } else {
+                showToast('⚠️ Перетащите PDF файл', 'info');
+            }
+        });
+
+        // Mobile sidebar toggle
+        function toggleSidebar() {
+            document.getElementById('sidebar').classList.toggle('open');
+        }
+
+        // Init
+        loadAllChatHistories();
+        connect();
+    </script>
+</body>
+</html>

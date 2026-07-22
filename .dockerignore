@@ -1,0 +1,17 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+.kilo
+.env
+node_modules
+*.log
+.DS_Store
+.agent_memory.json
+workspace
+tmp
+test_ws.py
+test_ws_simple.py
+*.swp
+*.swo
