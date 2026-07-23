@@ -239,7 +239,7 @@ async def lifespan(app: FastAPI):
         api_key=os.getenv("NVIDIA_API_KEY"),
         temperature=0.2,
         max_tokens=4000,
-        timeout=300,
+        timeout=360,
         max_retries=2
     )
     
@@ -459,7 +459,7 @@ async def ws_endpoint(websocket: WebSocket):
                 config_data = ""
                 config_error = ""
                 
-                show_config_kw = ("покажи конфигураци", "покажи настройк", "текущая конфигураци", "покажи конфиг", "текущие настройк", "текущие параметры", "покажи конфигурацию", "покажи все настройки", "покажи текущую конфигураци", "покажи текущие настройк", "расскажи про конфигураци", "расскажи конфигураци", "прочитай конфигураци", "покажи конфигурацию устройства", "покажи конфиг устройства", "отобрази конфигураци", "выведи конфигураци")
+                show_config_kw = ("покажи конфигураци", "покажи настройк", "текущая конфигураци", "покажи конфиг", "текущие настройк", "текущие параметры", "покажи конфигурацию", "покажи все настройки", "покажи текущую конфигураци", "покажи текущие настройк", "расскажи про конфигураци", "расскажи конфигураци", "прочитай конфигураци", "покажи конфигурацию устройства", "покажи конфиг устройства", "отобрази конфигураци", "выведи конфигураци", "напиши конфигураци", "напиши конфиг", "конфигураци", "кофигураци", "конфиг")
                 is_show_config = any(k in user_msg_lower for k in show_config_kw)
                 
                 # Если пользователь пишет просто "конфигурация" (без "покажи") — не авто-фетчим
@@ -560,6 +560,34 @@ async def ws_endpoint(websocket: WebSocket):
                 if config_fetched and len(config_data) > MAX_CONFIG_CHARS:
                     config_data = config_data[:MAX_CONFIG_CHARS] + f"\n\n... (обрезано, полный размер: {len(config_data)} символов)"
                     print(f"✂️ Конфиг обрезан до {MAX_CONFIG_CHARS} символов", flush=True)
+
+                # Если конфиг уже получен авто-запросом — формат через прямой LLM вызов,
+                # без агента (быстро, один запрос вместо 2-3)
+                if config_fetched and is_show_config:
+                    print("⚡ Прямой LLM вызов для форматирования конфига (без агента)...", flush=True)
+                    dev_name = active.get('name', active.get('ip')) if active else "устройства"
+                    format_prompt = (
+                        f"Пользователь спросил: '{user_msg}'. "
+                        f"Вот РЕАЛЬНАЯ конфигурация устройства {dev_name}, полученная по SSH:\n\n"
+                        f"{config_data}\n\n"
+                        f"ОТВЕТЬ ПО-РУССКИ. Кратко опиши конфигурацию: интерфейсы, IP, маршруты, VLAN. "
+                        f"Используй таблицы для наглядности. Не выдумывай данные."
+                    )
+                    try:
+                        direct_result = await asyncio.wait_for(llm.ainvoke([
+                            SystemMessage(content="Ты — старший сетевой инженер. Отвечай по-русски, используй таблицы где уместно."),
+                            HumanMessage(content=format_prompt)
+                        ]), timeout=120.0)
+                        direct_text = direct_result.content.strip() if isinstance(direct_result.content, str) else str(direct_result.content)
+                        if direct_text and len(direct_text) > 20:
+                            final_response = direct_text
+                            print(f"✅ Прямой LLM ответ: {len(final_response)} символов", flush=True)
+                        else:
+                            final_response = f"📋 Конфигурация устройства {dev_name}:\n\n{config_data}"
+                    except asyncio.TimeoutError:
+                        print("⚠️ Прямой LLM таймаут, возвращаю сырые данные", flush=True)
+                        final_response = f"📋 Конфигурация устройства {dev_name}:\n\n{config_data}"
+                    raise _SkipAgent(final_response)
 
                 # Создаём агента с актуальным набором инструментов для этого запроса
                 if len(agent_tools) == len(tools):

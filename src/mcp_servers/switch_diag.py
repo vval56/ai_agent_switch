@@ -23,8 +23,9 @@ class SwitchCommandArgs(BaseModel):
     host: str = Field(description="IP-адрес или hostname коммутатора")
     username: str = Field(description="Имя пользователя для SSH")
     password: str = Field(description="Пароль для SSH")
-    command: str = Field(description="Диагностическая команда (например, 'show running-config')")
-    device_type: str = Field(default="cisco_ios", description="Тип устройства: 'zyxel_os' или 'cisco_ios'")
+    command: str = Field(description="Команда (например, 'show running-config' или 'vlan database')")
+    device_type: str = Field(default="zyxel_os", description="Тип устройства: 'zyxel_os' или 'cisco_ios'")
+    confirm: bool = Field(default=False, description="Подтверждение опасной операции (установите True только если пользователь явно подтвердил)")
 
 def _load_policy(device_ip: str = ""):
     from src.utils.memory import get_command_policies
@@ -57,13 +58,15 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="apply_switch_config",
-            description="Выполняет ОДНУ безопасную команду конфигурации на коммутаторе Zyxel/Cudy. ИСПОЛЬЗУЙ ТОЛЬКО когда пользователь явно просит внести правки/изменения. Запрещены опасные команды (erase, delete, reload, write erase и т.д.). Возвращает результат применения.",
+            description="Выполняет ОДНУ команду конфигурации на коммутаторе Zyxel/Cudy. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ (confirm=true). ИСПОЛЬЗУЙ ТОЛЬКО когда пользователь явно сказал 'да', 'подтверждаю', 'выполняй'. Запрещены опасные команды (erase, delete, reload, write erase и т.д.). Возвращает результат применения.",
             inputSchema=SwitchCommandArgs.model_json_schema(),
         )
     ]
 
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+    args = SwitchCommandArgs(**arguments)
+    
     if name == "execute_switch_command":
         cmd_lower = args.command.lower().strip()
         policy = _load_policy(args.host)
@@ -73,6 +76,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return await _run_command(args)
 
     if name == "apply_switch_config":
+        if not args.confirm:
+            return [TextContent(type="text", text="⚠️ Для выполнения команды конфигурации требуется явное подтверждение пользователя. Попросите пользователя подтвердить операцию.")]
         if not _is_safe_command(args.command, args.host):
             policy = _load_policy(args.host)
             blocked = policy.get("blocked_patterns", [])
