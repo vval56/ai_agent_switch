@@ -8,10 +8,12 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Системные зависимости для PDF/SSH/MCP
+# Системные зависимости для PDF/SSH/MCP (npx для filesystem)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     openssh-client \
+    nodejs \
+    npm \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

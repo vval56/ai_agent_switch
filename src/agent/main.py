@@ -30,6 +30,10 @@ from src.utils.telegram import is_telegram_enabled
 
 load_dotenv()
 
+class _SkipAgent(Exception):
+    """Пропустить обработку агента, final_response уже установлен."""
+    pass
+
 async def safe_ws_send(websocket: WebSocket, payload: dict):
     try:
         if websocket.client_state == WebSocketState.CONNECTED:
@@ -450,20 +454,23 @@ async def ws_endpoint(websocket: WebSocket):
                 if not active:
                     active = memory.get("active_switch")
                 
-                # Автоматически вызываем get_switch_config для запросов про конфигурацию
+                # Автоматически вызываем get_switch_config ТОЛЬКО если пользователь явно просит показать конфигурацию
                 config_fetched = False
                 config_data = ""
                 config_error = ""
                 
-                config_kw = ("конфигурац", "кофигурац", "конфигура", "настройки", "текущие параметры", "настройка", "правила firewall", "firewall", "nat", "маршрут", "route", "interface", "интерфейс", "провер.*правильн", "анализ.*конфиг", "проверить.*конфиг", "проверить.*правила", "предложить.*улучш", "настроить vlan", "настрой vlan", "как настроить", "настрой.*vlan", "vlan", "bridge", "mstp", "stp", "port", "порт", "ip address", "ip.*адрес", "dhcp", "dns", "proxy", "ntp", "user", "роут", "маршрут", "qos", "traffic", "qos", "как настроить", "что настроить", "проверь настрой", "анализ.*настрой", "как.*настроить")
-                is_config_request = any(k in user_msg_lower for k in config_kw)
+                show_config_kw = ("покажи конфигураци", "покажи настройк", "текущая конфигураци", "покажи конфиг", "текущие настройк", "текущие параметры", "покажи конфигурацию", "покажи все настройки", "покажи текущую конфигураци", "покажи текущие настройк", "расскажи про конфигураци", "расскажи конфигураци", "прочитай конфигураци", "покажи конфигурацию устройства", "покажи конфиг устройства", "отобрази конфигураци", "выведи конфигураци")
+                is_show_config = any(k in user_msg_lower for k in show_config_kw)
+                
+                # Если пользователь пишет просто "конфигурация" (без "покажи") — не авто-фетчим
+                # Только если явно просит показать/отобразить
                 
                 # Также проверяем — если пользователь НЕ просит "без подключения" / "только в базе"
                 no_connect_kw = ("без подключения", "не подключайся", "не подключай", "только в базе", "только поиск", "pdf only", "search pdf", "в мануале", "в базе знаний", "поиск в базе", "найди в базе")
                 is_pdf_only = any(k in user_msg_lower for k in no_connect_kw)
                 
-                # Вызываем get_switch_config если это не PDF-режим
-                if active and is_config_request and not is_pdf_only:
+                # Вызываем get_switch_config ТОЛЬКО при явном запросе показа конфигурации
+                if active and is_show_config and not is_pdf_only:
                     print(f"🔧 АВТО-ЗАПРОС get_switch_config для {active.get('name', active.get('ip'))}", flush=True)
                     config_data = _get_switch_config(
                         active['ip'], active['username'], active['password'],
@@ -548,6 +555,12 @@ async def ws_endpoint(websocket: WebSocket):
                 messages.append(HumanMessage(content=user_msg + context_mem))
                 input_messages_count = len(messages)
                 
+                # Обрезаем конфиг если он слишком большой (чтобы не висеть на 70B модели)
+                MAX_CONFIG_CHARS = 4000
+                if config_fetched and len(config_data) > MAX_CONFIG_CHARS:
+                    config_data = config_data[:MAX_CONFIG_CHARS] + f"\n\n... (обрезано, полный размер: {len(config_data)} символов)"
+                    print(f"✂️ Конфиг обрезан до {MAX_CONFIG_CHARS} символов", flush=True)
+
                 # Создаём агента с актуальным набором инструментов для этого запроса
                 if len(agent_tools) == len(tools):
                     active_agent = agent
@@ -559,8 +572,13 @@ async def ws_endpoint(websocket: WebSocket):
                     try:
                         result = await asyncio.wait_for(active_agent.ainvoke({"messages": messages}), timeout=240.0)
                     except asyncio.TimeoutError:
-                        print("⚠️ Агент не ответил за 240с, повтор...", flush=True)
-                        result = await active_agent.ainvoke({"messages": messages})
+                        print("⚠️ Агент не ответил за 240с, возвращаю сырые данные", flush=True)
+                        if config_fetched and config_data:
+                            final_response = f"📋 Конфигурация устройства {active.get('name', active.get('ip'))}:\n\n{config_data}"
+                        else:
+                            final_response = "⚠️ Агент не ответил за 240с. Попробуй ещё раз."
+                        # Пропускаем всю дальнейшую обработку
+                        raise _SkipAgent(final_response)
 
                 def _msg_to_text(msg):
                     """Извлекает текст из сообщения, включая reasoning_content для nemotron."""
@@ -632,6 +650,9 @@ async def ws_endpoint(websocket: WebSocket):
                     final_response = "⚠️ Модель вернула пустой ответ."
 
                 print(f"📤 Финальный ответ: {len(final_response)} символов", flush=True)
+            except _SkipAgent as skip:
+                final_response = str(skip)
+                print(f"📤 Финальный ответ (skip): {len(final_response)} символов", flush=True)
             except Exception as e:
                 print(f"❌ Ошибка агента: {e}", flush=True)
                 final_response = f"❌ Ошибка: {str(e)}"
