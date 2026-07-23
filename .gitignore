@@ -6,7 +6,7 @@ __pycache__/
 venv/
 env/
 .env
-.agent_memory.json
+
 *.log
 
 # macOS

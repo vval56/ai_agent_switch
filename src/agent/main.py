@@ -190,6 +190,14 @@ async def lifespan(app: FastAPI):
         if s.get("enabled", True)
     }
 
+    # Используем venv python для MCP-серверов, если они запускаются через python
+    import sys as _sys
+    _venv_python = _sys.executable
+    for name, server in mcp_servers.items():
+        if server.get("command", "").strip() == "python":
+            server["command"] = _venv_python
+            print(f"  🔧 MCP '{name}': python → {_venv_python}", flush=True)
+
     default_docs_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), "../../docs"))
     docs_dir = os.getenv("DOCS_DIR", default_docs_dir)
     if "filesystem" in mcp_servers:
@@ -208,17 +216,25 @@ async def lifespan(app: FastAPI):
         print("✅ База знаний переинициализирована.", flush=True)
     
     mcp_client = MultiServerMCPClient(mcp_servers)
-    mcp_tools = await mcp_client.get_tools()
+    mcp_tools = []
+    try:
+        mcp_tools = await mcp_client.get_tools()
+        print(f"✅ MCP инструментов загружено: {len(mcp_tools)}", flush=True)
+    except Exception as e:
+        print(f"⚠️ Ошибка загрузки MCP инструментов: {e}", flush=True)
+        print("⚠️ Продолжаем без MCP-инструментов.", flush=True)
+        # Создаём пустой клиент, чтобы close не упал
+        mcp_client = MultiServerMCPClient({})
     
     tools = mcp_tools + [search_pdf_knowledge_base, get_switch_config, get_switch_logs_tool]
     print(f"✅ Загружено инструментов: {len(tools)}", flush=True)
     
     llm = ChatOpenAI(
-        model=os.getenv("NVIDIA_MODEL_NAME", "nvidia/llama-3.3-nemotron-super-49b-v1"),
+        model=os.getenv("NVIDIA_MODEL_NAME", "meta/llama-3.3-70b-instruct"),
         base_url=os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
         api_key=os.getenv("NVIDIA_API_KEY"),
         temperature=0.2,
-        max_tokens=2000,
+        max_tokens=4000,
         timeout=300,
         max_retries=2
     )
@@ -425,8 +441,10 @@ async def ws_endpoint(websocket: WebSocket):
                 active = None
                 if device_id:
                     devices = memory.get("devices", [])
-                    for dev in devices:
-                        if str(dev.get("id", "")) == str(device_id) or str(dev.get("ip", "")) == str(device_id):
+                    for idx, dev in enumerate(devices):
+                        dev_id = str(dev.get("id", ""))
+                        dev_ip = str(dev.get("ip", ""))
+                        if dev_id == str(device_id) or dev_ip == str(device_id) or str(idx) == str(device_id):
                             active = dev
                             break
                 if not active:
@@ -437,7 +455,7 @@ async def ws_endpoint(websocket: WebSocket):
                 config_data = ""
                 config_error = ""
                 
-                config_kw = ("конфигурац", "конфигура", "настройки", "текущие параметры", "настройка", "правила firewall", "firewall", "nat", "маршрут", "route", "interface", "интерфейс", "провер.*правильн", "анализ.*конфиг", "проверить.*конфиг", "проверить.*правила", "предложить.*улучш", "настроить vlan", "настрой vlan", "как настроить", "настрой.*vlan", "vlan", "bridge", "mstp", "stp", "port", "порт", "ip address", "ip.*адрес", "dhcp", "dns", "proxy", "ntp", "user", "роут", "маршрут", "qos", "traffic", "qos", "как настроить", "что настроить", "проверь настрой", "анализ.*настрой", "как.*настроить")
+                config_kw = ("конфигурац", "кофигурац", "конфигура", "настройки", "текущие параметры", "настройка", "правила firewall", "firewall", "nat", "маршрут", "route", "interface", "интерфейс", "провер.*правильн", "анализ.*конфиг", "проверить.*конфиг", "проверить.*правила", "предложить.*улучш", "настроить vlan", "настрой vlan", "как настроить", "настрой.*vlan", "vlan", "bridge", "mstp", "stp", "port", "порт", "ip address", "ip.*адрес", "dhcp", "dns", "proxy", "ntp", "user", "роут", "маршрут", "qos", "traffic", "qos", "как настроить", "что настроить", "проверь настрой", "анализ.*настрой", "как.*настроить")
                 is_config_request = any(k in user_msg_lower for k in config_kw)
                 
                 # Также проверяем — если пользователь НЕ просит "без подключения" / "только в базе"
@@ -498,72 +516,122 @@ async def ws_endpoint(websocket: WebSocket):
                     context_mem += "\n[АКТИВНЫЙ КОММУТАТОР: не выбран. Если user просит подключиться — используй connect_switch с данными из сообщения.]\n"
 
                 agent_tools = tools
+                ssh_tool_names = {"connect_switch", "execute_switch_command", "get_switch_logs", "get_switch_config", "get_switch_logs_tool"}
+
+                def _tool_name(t):
+                    return t.get('name', '') if isinstance(t, dict) else getattr(t, 'name', '')
 
                 pdf_only_kw = ("без подключения", "не подключайся", "не подключай", "только в базе", "только поиск", "pdf only", "search pdf", "в мануале", "в базе знаний", "поиск в базе", "найди в базе")
                 if any(k in user_msg_lower for k in pdf_only_kw):
-                    ssh_tool_names = {"connect_switch", "execute_switch_command", "get_switch_logs", "get_switch_config", "get_switch_logs_tool"}
-                    agent_tools = [t for t in agent_tools if (getattr(t, 'name', '') if not isinstance(t, dict) else t.get('name', '')) not in ssh_tool_names]
+                    agent_tools = [t for t in agent_tools if _tool_name(t) not in ssh_tool_names]
                     context_mem += "\n[РЕЖИМ: только база знаний / PDF. НЕ подключайся к коммутатору, НЕ вызывай SSH-инструменты.]\n"
+                elif config_fetched:
+                    # Конфиг уже получен авто-запросом — убираем SSH-инструменты,
+                    # чтобы reasoning-модель не зациклилась на повторных вызовах get_switch_config.
+                    agent_tools = [t for t in agent_tools if _tool_name(t) not in ssh_tool_names]
+                    context_mem += "\n[ВАЖНО: конфигурация УЖЕ приложена выше. НЕ вызывай SSH-инструменты повторно — просто анализируй данные и дай ответ текстом.]\n"
 
                 history = get_chat_history(device_id or "default")
                 messages = [SystemMessage(content=SYSTEM_PROMPT)]
+                skip_history_prefixes = ("⚠️ Модель вернула пустой ответ", "⚠️ Произошла неизвестная ошибка", "❌ Ошибка:")
                 for entry in history[-10:]:
-                    if entry["role"] == "user":
-                        messages.append(HumanMessage(content=entry["content"]))
-                    elif entry["role"] == "assistant":
-                        messages.append(AIMessage(content=entry["content"]))
+                    role = entry.get("role", "")
+                    content = (entry.get("content") or "").strip()
+                    if not content:
+                        continue
+                    if role == "assistant" and content.startswith(skip_history_prefixes):
+                        continue
+                    if role == "user":
+                        messages.append(HumanMessage(content=content))
+                    elif role == "assistant":
+                        messages.append(AIMessage(content=content))
                 messages.append(HumanMessage(content=user_msg + context_mem))
+                input_messages_count = len(messages)
                 
-                payload = {
-                    "messages": messages,
-                    "tools": [t if isinstance(t, dict) else _tool_to_dict(t) for t in agent_tools]
-                }
+                # Создаём агента с актуальным набором инструментов для этого запроса
+                if len(agent_tools) == len(tools):
+                    active_agent = agent
+                else:
+                    active_agent = create_agent(llm, agent_tools)
+                    print(f"🔧 Агент пересоздан с {len(agent_tools)} инструментами (из {len(tools)})", flush=True)
+
                 async with agent_lock:
                     try:
-                        result = await asyncio.wait_for(agent.ainvoke(payload), timeout=240.0)
+                        result = await asyncio.wait_for(active_agent.ainvoke({"messages": messages}), timeout=240.0)
                     except asyncio.TimeoutError:
                         print("⚠️ Агент не ответил за 240с, повтор...", flush=True)
-                        result = await agent.ainvoke(payload)
+                        result = await active_agent.ainvoke({"messages": messages})
 
-                def _msg_to_text(content):
+                def _msg_to_text(msg):
+                    """Извлекает текст из сообщения, включая reasoning_content для nemotron."""
+                    content = getattr(msg, "content", None)
+                    text = ""
                     if isinstance(content, str):
-                        return content
-                    if isinstance(content, list):
+                        text = content
+                    elif isinstance(content, list):
                         parts = []
                         for p in content:
                             if isinstance(p, dict):
-                                if p.get("type") == "text" and p.get("text"):
-                                    parts.append(p["text"])
-                                elif "text" in p and p["text"]:
+                                if p.get("text"):
                                     parts.append(p["text"])
                             elif isinstance(p, str):
                                 parts.append(p)
-                        return "\n".join(parts)
-                    return str(content)
+                        text = "\n".join(parts)
+                    else:
+                        text = str(content) if content else ""
 
-                messages = result.get("messages", [])
+                    text = text.strip()
+                    if text:
+                        return text
+
+                    # Если content пустой — пробуем reasoning_content (nemotron reasoning модели)
+                    extra = getattr(msg, "additional_kwargs", {}) or {}
+                    reasoning = extra.get("reasoning_content") or extra.get("reasoning")
+                    if reasoning and isinstance(reasoning, str):
+                        return reasoning.strip()
+
+                    # Если и это пусто — пробуем response_metadata (некоторые API возвращают туда текст)
+                    meta = getattr(msg, "response_metadata", {}) or {}
+                    meta_text = meta.get("content") or meta.get("text") or meta.get("message")
+                    if meta_text and isinstance(meta_text, str):
+                        return meta_text.strip()
+
+                    return ""
+
+                result_messages = result.get("messages", [])
+                new_messages = result_messages[input_messages_count:] or result_messages[-1:]
+                print(f"🔍 Получено {len(result_messages)} сообщений (новых: {len(new_messages)})", flush=True)
+
                 ai_text = None
                 tool_error = None
                 tool_text = ""
-                for msg in reversed(messages):
+                for msg in reversed(new_messages):
                     msg_type = type(msg).__name__
-                    if msg_type == "ToolMessage" and getattr(msg, "content", None):
-                        txt = _msg_to_text(msg.content).strip()
+                    txt = _msg_to_text(msg)
+                    if msg_type == "ToolMessage":
                         if txt.startswith("❌") or txt.startswith("ОШИБКА"):
-                            tool_error = txt
-                            break
-                        elif not tool_error:
+                            if not tool_error:
+                                tool_error = txt
+                        elif txt and not tool_text:
                             tool_text = txt
-                    elif isinstance(msg, AIMessage) and msg.content and not tool_error:
-                        ai_text = _msg_to_text(msg.content).strip()
-                        if ai_text:
-                            break
-                if tool_error:
-                    final_response = tool_error
-                elif ai_text:
+                    elif isinstance(msg, AIMessage):
+                        if txt and not ai_text:
+                            ai_text = txt
+
+                if ai_text:
                     final_response = ai_text
+                elif tool_error:
+                    final_response = tool_error
+                elif tool_text:
+                    final_response = tool_text
+                elif config_fetched and config_data:
+                    final_response = f"📋 Конфигурация устройства {active.get('name', active.get('ip'))}:\n\n{config_data}"
+                elif config_error:
+                    final_response = f"❌ Не удалось получить данные с устройства: {config_error}"
                 else:
-                    final_response = tool_text or "⚠️ Модель вернула пустой ответ."
+                    final_response = "⚠️ Модель вернула пустой ответ."
+
+                print(f"📤 Финальный ответ: {len(final_response)} символов", flush=True)
             except Exception as e:
                 print(f"❌ Ошибка агента: {e}", flush=True)
                 final_response = f"❌ Ошибка: {str(e)}"
@@ -576,9 +644,11 @@ async def ws_endpoint(websocket: WebSocket):
             if hasattr(websocket, 'pending_requests') and request_id in websocket.pending_requests:
                 del websocket.pending_requests[request_id]
             
-            # Сохраняем в per-device историю
-            append_chat_history(device_id or "default", "user", user_msg)
-            append_chat_history(device_id or "default", "assistant", final_response)
+            # Сохраняем в per-device историю (кроме служебных фолбэков/ошибок)
+            _skip_prefixes = ("⚠️ Модель вернула пустой ответ", "⚠️ Произошла неизвестная ошибка", "❌ Ошибка:")
+            if not final_response.startswith(_skip_prefixes):
+                append_chat_history(device_id or "default", "user", user_msg)
+                append_chat_history(device_id or "default", "assistant", final_response)
                 
         except Exception as e:
             print(f"❌ Ошибка обработки сообщения: {e}", flush=True)
