@@ -34,6 +34,17 @@ class _SkipAgent(Exception):
     """Пропустить обработку агента, final_response уже установлен."""
     pass
 
+def _is_write_request(user_msg_lower: str) -> bool:
+    write_keywords = [
+        "настрой", "настроить", "измени", "изменить", "добавь", "добавить",
+        "удали", "удалить", "включи", "включить", "выключи", "выключить",
+        "запусти", "запустить", "останови", "остановить", "примени",
+        "применить", "установи", "установить", "создай", "создать",
+        "раздач", "wifi", "wireless", "firewall", "vlan", "dhcp", "nat",
+        "bridge", "interface", "порт", "port", "ssid", "ip address"
+    ]
+    return any(k in user_msg_lower for k in write_keywords)
+
 async def safe_ws_send(websocket: WebSocket, payload: dict):
     try:
         if websocket.client_state == WebSocketState.CONNECTED:
@@ -179,10 +190,9 @@ def index_pdf_file(file_path: str):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global agent, tools, mcp_client, llm, rag_db
+    global agent, tools, mcp_client, llm, llm_write, rag_db
     
     print("🚀 Запуск агента сетевой диагностики...", flush=True)
-    
     config_path = os.path.join(os.path.dirname(__file__), "../../mcp_config.json")
     config_path = os.path.normpath(config_path)
     with open(config_path) as f:
@@ -238,9 +248,19 @@ async def lifespan(app: FastAPI):
         base_url=os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
         api_key=os.getenv("NVIDIA_API_KEY"),
         temperature=0.2,
+        max_tokens=2000,
+        timeout=180,
+        max_retries=1
+    )
+    
+    llm_write = ChatOpenAI(
+        model=os.getenv("NVIDIA_MODEL_NAME2", "meta/llama-3.3-70b-instruct"),
+        base_url=os.getenv("NVIDIA_BASE_URL2", "https://integrate.api.nvidia.com/v1"),
+        api_key=os.getenv("NVIDIA_API_KEY2") or os.getenv("NVIDIA_API_KEY"),
+        temperature=0.2,
         max_tokens=4000,
-        timeout=360,
-        max_retries=2
+        timeout=600,
+        max_retries=1
     )
     
     agent = create_agent(llm, tools)
@@ -438,7 +458,9 @@ async def ws_endpoint(websocket: WebSocket):
             
             final_response = "⚠️ Произошла неизвестная ошибка при обработке запроса."
             user_msg_lower = user_msg.lower()
-            print("🔄 Использую агента...", flush=True)
+            is_write = _is_write_request(user_msg_lower)
+            current_llm = llm_write if is_write else llm
+            print(f"🔄 Использую агента... (тип: {'write' if is_write else 'read'}, LLM: {'NVIDIA' if is_write else 'Groq'})", flush=True)
             try:
                 memory = load_memory()
                 context_mem = ""
@@ -509,16 +531,39 @@ async def ws_endpoint(websocket: WebSocket):
                     else:
                         dev_name = active.get('name', active.get('ip'))
                         dev_ip = active['ip']
-                        context_mem += (
-                            f"\n[АКТИВНЫЙ КОММУТАТОР — РАБОТАЙ ТОЛЬКО С НИМ]:\n"
-                            f"Имя: {dev_name} | IP: {dev_ip} | Тип: {active['device_type']} | "
-                            f"Пользователь: {active['username']} | Пароль: {active['password']}\n"
-                            f"{policy_info}\n"
-                            f"❌❌❌ КРИТИЧЕСКАЯ ОШИБКА: get_switch_config НЕ УДАЛОСЬ — {config_error}\n"
-                            f"ТВОЙ ЕДИНСТВЕННЫЙ ОТВЕТ: напиши пользователю 'Не удалось подключиться к коммутатору {dev_name} ({dev_ip}): {config_error}'\n"
-                            f"НЕ генерируй команды, НЕ предлагай действия, НЕ предлагай policy, НЕ генерируй 'ручную настройку'.\n"
-                            f"БОЛЬШЕ НИЧЕГО НЕ ОТВЕЧАЙ.\n"
-                        )
+                        if is_write:
+                            default_script = ""
+                            if active.get("device_type", "").startswith("mikrotik"):
+                                default_script = (
+                                    "/interface wireless enable [find]; "
+                                    "/interface wireless security-profiles set [find default=yes] mode=dynamic-keys authentication-types=wpa2-psk,wpa3-psk; "
+                                    "/interface wireless set [find] disabled=no ssid=AI-Agent-WiFi mode=ap bridge=bridge security-profile=default; "
+                                    "/ip pool add name=dhcp_wifi ranges=192.168.88.10-192.168.88.100; "
+                                    "/ip dhcp-server network add address=192.168.88.0/24 gateway=192.168.88.1 dns-server=192.168.88.1; "
+                                    "/ip dhcp-server add interface=[/interface wireless find] address-pool=dhcp_wifi disabled=no; "
+                                    "/ip address add address=192.168.88.1/24 interface=[/interface wireless find] disabled=no"
+                                )
+                            context_mem += (
+                                f"\n[АКТИВНЫЙ КОММУТАТОР — РАБОТАЙ ТОЛЬКО С НИМ]:\n"
+                                f"Имя: {dev_name} | IP: {dev_ip} | Тип: {active['device_type']} | "
+                                f"Пользователь: {active['username']} | Пароль: {active['password']}\n"
+                                f"{policy_info}\n"
+                                f"[ЗАДАЧА: ИСПОЛНИТЬ КОМАНДЫ ЧЕРЕЗ apply_routeros_config с confirm=true. "
+                                f"Для Mirotik используй ТОЛЬКО команды RouterOS, начиная с /.\n"
+                                f"Если задача — настройка WiFi, выполни этот скрипт: {default_script}\n"
+                                f"НЕ ПРИДУМЫВАЙ КОМАНДЫ САМ — используй инструменты.]\n"
+                            )
+                        else:
+                            context_mem += (
+                                f"\n[АКТИВНЫЙ КОММУТАТОР — РАБОТАЙ ТОЛЬКО С НИМ]:\n"
+                                f"Имя: {dev_name} | IP: {dev_ip} | Тип: {active['device_type']} | "
+                                f"Пользователь: {active['username']} | Пароль: {active['password']}\n"
+                                f"{policy_info}\n"
+                                f"❌❌❌ КРИТИЧЕСКАЯ ОШИБКА: get_switch_config НЕ УДАЛОСЬ — {config_error}\n"
+                                f"ТВОЙ ЕДИНСТВЕННЫЙ ОТВЕТ: напиши пользователю 'Не удалось подключиться к коммутатору {dev_name} ({dev_ip}): {config_error}'\n"
+                                f"НЕ генерируй команды, НЕ предлагай действия, НЕ предлагай policy, НЕ генерируй 'ручную настройку'.\n"
+                                f"БОЛЬШЕ НИЧЕГО НЕ ОТВЕЧАЙ.\n"
+                            )
                 else:
                     context_mem += "\n[АКТИВНЫЙ КОММУТАТОР: не выбран. Если user просит подключиться — используй connect_switch с данными из сообщения.]\n"
 
@@ -574,7 +619,7 @@ async def ws_endpoint(websocket: WebSocket):
                         f"Используй таблицы для наглядности. Не выдумывай данные."
                     )
                     try:
-                        direct_result = await asyncio.wait_for(llm.ainvoke([
+                        direct_result = await asyncio.wait_for(current_llm.ainvoke([
                             SystemMessage(content="Ты — старший сетевой инженер. Отвечай по-русски, используй таблицы где уместно."),
                             HumanMessage(content=format_prompt)
                         ]), timeout=120.0)
@@ -590,22 +635,57 @@ async def ws_endpoint(websocket: WebSocket):
                     raise _SkipAgent(final_response)
 
                 # Создаём агента с актуальным набором инструментов для этого запроса
-                if len(agent_tools) == len(tools):
+                if len(agent_tools) == len(tools) and current_llm is llm:
                     active_agent = agent
                 else:
-                    active_agent = create_agent(llm, agent_tools)
+                    active_agent = create_agent(current_llm, agent_tools)
                     print(f"🔧 Агент пересоздан с {len(agent_tools)} инструментами (из {len(tools)})", flush=True)
 
                 async with agent_lock:
                     try:
-                        result = await asyncio.wait_for(active_agent.ainvoke({"messages": messages}), timeout=240.0)
+                        result = await asyncio.wait_for(active_agent.ainvoke({"messages": messages}), timeout=90.0)
                     except asyncio.TimeoutError:
-                        print("⚠️ Агент не ответил за 240с, возвращаю сырые данные", flush=True)
+                        if is_write and active and active.get("device_type", "").startswith("mikrotik"):
+                            print("⚠️ Агент не ответил за 120с, пробую прямой выполнение через SSH...", flush=True)
+                            try:
+                                from src.mcp_servers.mikrotik_diag import call_tool
+                                script = [
+                                    ("/interface wireless enable [find]", "false"),
+                                    ("/interface wireless security-profiles set [find default=yes] mode=dynamic-keys authentication-types=wpa2-psk,wpa3-psk", "false"),
+                                    ("/interface wireless set [find] disabled=no ssid=AI-Agent-WiFi mode=ap bridge=bridge security-profile=default", "true"),
+                                    ("/ip pool add name=dhcp_wifi ranges=192.168.88.10-192.168.88.100", "true"),
+                                    ("/ip dhcp-server network add address=192.168.88.0/24 gateway=192.168.88.1 dns-server=192.168.88.1", "true"),
+                                    ("/ip dhcp-server add interface=[/interface wireless find] address-pool=dhcp_wifi disabled=no", "true"),
+                                    ("/ip address add address=192.168.88.1/24 interface=[/interface wireless find] disabled=no", "true"),
+                                ]
+                                host = active.get("ip")
+                                username = active.get("username")
+                                password = active.get("password")
+                                results = []
+                                for cmd, confirm in script:
+                                    args = {
+                                        "host": host,
+                                        "username": username,
+                                        "password": password,
+                                        "command": cmd,
+                                        "confirm": confirm,
+                                    }
+                                    try:
+                                        r = await call_tool("apply_routeros_config", args)
+                                        text = r[0].text if r else "Нет результата"
+                                    except Exception as e:
+                                        text = f"❌ Ошибка: {e}"
+                                    results.append(f"{cmd}\n→ {text}")
+                                final_response = "⚡ Выполнено на MikroTik (fallback после таймаута, без LLM):\n\n" + "\n\n".join(results)
+                                raise _SkipAgent(final_response)
+                            except Exception as e:
+                                final_response = f"❌ Fallback SSH ошибка: {e}"
+                                raise _SkipAgent(final_response)
+                        print("⚠️ Агент не ответил за 120с, возвращаю сырые данные", flush=True)
                         if config_fetched and config_data:
                             final_response = f"📋 Конфигурация устройства {active.get('name', active.get('ip'))}:\n\n{config_data}"
                         else:
-                            final_response = "⚠️ Агент не ответил за 240с. Попробуй ещё раз."
-                        # Пропускаем всю дальнейшую обработку
+                            final_response = "⚠️ Агент не ответил за 120с. Попробуй ещё раз."
                         raise _SkipAgent(final_response)
 
                 def _msg_to_text(msg):

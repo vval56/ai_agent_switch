@@ -17,7 +17,7 @@ from src.utils.telegram import notify_telegram, is_telegram_enabled
 from src.utils.memory import load_memory
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format="%(asctime)s %(levelname)s %(message)s",
 )
 logger = logging.getLogger(__name__)

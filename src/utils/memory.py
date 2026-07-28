@@ -183,9 +183,10 @@ def get_switch_logs(host, username, password, device_type="zyxel_os", only_error
 
 
 
-def get_switch_config(host, username, password, device_type="zyxel_os", read_timeout=40):
+def get_switch_config(host, username, password, device_type="zyxel_os", read_timeout=40, topic=""):
     device_type = _normalize_device_type(device_type)
     """Собирает РЕАЛЬНУЮ текущую конфигурацию коммутатора родными командами ZyNOS.
+    Если указан topic (firewall/vlan/interface/route/dns/dhcp) — выполняет только релевантные команды.
     Возвращает ТОЛЬКО то, что реально ответил коммутатор (без выдумок)."""
     from netmiko import ConnectHandler, NetmikoTimeoutException, NetmikoAuthenticationException
 
@@ -198,28 +199,48 @@ def get_switch_config(host, username, password, device_type="zyxel_os", read_tim
         "global_delay_factor": 2,
     }
 
+    # Topic-specific commands for MikroTik (без /export — он слишком большой)
+    mikrotik_all = [
+        "/system resource print",
+        "/system identity print",
+        "/interface print",
+        "/ip address print",
+        "/ip route print",
+        "/ip firewall filter print",
+        "/ip nat print",
+        "/ip dhcp-server print",
+        "/ip dhcp-client print",
+        "/ip dns print",
+        "/ntp client print",
+        "/user print",
+        "/log print limit=20",
+        "/system package print",
+    ]
+    mikrotik_topics = {
+        "firewall": ["/ip firewall filter print", "/ip nat print", "/ip firewall address-list print"],
+        "vlan": ["/interface vlan print", "/interface ethernet print"],
+        "interface": ["/interface print", "/interface ethernet print", "/ip address print"],
+        "route": ["/ip route print", "/ip route print where dynamic=no"],
+        "dns": ["/ip dns print"],
+        "dhcp": ["/ip dhcp-server print", "/ip dhcp-client print", "/ip dhcp-server network print"],
+    }
+
     if device_type == "zyxel_os":
-        cmds = ["show vlan", "show interface", "show interfaces status", "show ip route", "show config"]
+        if topic and topic == "firewall":
+            cmds = ["show config"]
+        elif topic and topic == "vlan":
+            cmds = ["show vlan", "show interface"]
+        elif topic and topic == "interface":
+            cmds = ["show interface", "show interfaces status"]
+        elif topic and topic == "route":
+            cmds = ["show ip route"]
+        else:
+            cmds = ["show vlan", "show interface", "show interfaces status", "show ip route", "show config"]
     elif device_type in ("mikrotik_routeros", "mikrotik_routeros_v7"):
-        cmds = [
-            "/system resource print",
-            "/system identity print",
-            "/interface print",
-            "/ip address print",
-            "/ip route print",
-            "/ip route print where dynamic=no",
-            "/ip firewall filter print",
-            "/ip nat print",
-            "/ip dhcp-server print",
-            "/ip dhcp-client print",
-            "/ip dns print",
-            "/ntp client print",
-            "/user print",
-            "/user-group print",
-            "/log print limit=50",
-            "/system package print",
-            "/export",
-        ]
+        if topic and topic in mikrotik_topics:
+            cmds = mikrotik_topics[topic]
+        else:
+            cmds = mikrotik_all
     else:
         cmds = ["show vlan", "show ip interface brief", "show ip route", "show running-config"]
 

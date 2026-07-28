@@ -10,14 +10,32 @@ from pydantic import BaseModel, Field
 from netmiko import ConnectHandler, NetmikoTimeoutException, NetmikoAuthenticationException
 from dotenv import load_dotenv
 
-sys.path.append(os.path.normpath(os.path.join(os.path.dirname(__file__), "../..")))
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(__file__), "../..")))
 load_dotenv()
 from src.utils.telegram import notify_telegram, is_telegram_enabled
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.WARNING)
+
+# Отключаем спам от httpx (Telegram) и paramiko
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("paramiko").setLevel(logging.WARNING)
+logging.getLogger("paramiko.transport").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
-app = Server("switch-diag-server")
+# Дедупликация: не выполнять ту же команду дважды (для apply_switch_config)
+_command_cache = {}
+
+def _dedup_check(host: str, command: str) -> bool:
+    """Проверяет, выполнялась ли уже эта команда. Если да — возвращает False."""
+    key = f"{host}::{command.strip()}"
+    if key in _command_cache:
+        return False
+    _command_cache[key] = True
+    if len(_command_cache) > 100:
+        _command_cache.clear()
+    return True
 
 class SwitchCommandArgs(BaseModel):
     host: str = Field(description="IP-адрес или hostname коммутатора")
@@ -25,7 +43,12 @@ class SwitchCommandArgs(BaseModel):
     password: str = Field(description="Пароль для SSH")
     command: str = Field(description="Команда (например, 'show running-config' или 'vlan database')")
     device_type: str = Field(default="zyxel_os", description="Тип устройства: 'zyxel_os' или 'cisco_ios'")
-    confirm: bool = Field(default=False, description="Подтверждение опасной операции (установите True только если пользователь явно подтвердил)")
+    confirm: str = Field(default="false", description="Подтверждение опасной операции. Установите 'true' только если пользователь явно подтвердил (сказал 'да', 'подтверждаю', 'выполняй')")
+
+    def is_confirmed(self) -> bool:
+        return str(self.confirm).lower().strip() in ('true', '1', 'yes', 'да', 'подтверждаю', 'выполняй')
+
+app = Server("switch-diag-server")
 
 def _load_policy(device_ip: str = ""):
     from src.utils.memory import get_command_policies
@@ -53,12 +76,12 @@ async def list_tools() -> list[Tool]:
     return [
         Tool(
             name="execute_switch_command",
-            description="Подключается к коммутатору Zyxel или Cudy по SSH и выполняет ТОЛЬКО диагностические команды чтения. НЕ выполняет команды записи.",
+            description="Zyxel/Cudy: выполнить команду чтения (show, display, ping, traceroute).",
             inputSchema=SwitchCommandArgs.model_json_schema(),
         ),
         Tool(
             name="apply_switch_config",
-            description="Выполняет ОДНУ команду конфигурации на коммутаторе Zyxel/Cudy. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ (confirm=true). ИСПОЛЬЗУЙ ТОЛЬКО когда пользователь явно сказал 'да', 'подтверждаю', 'выполняй'. Запрещены опасные команды (erase, delete, reload, write erase и т.д.). Возвращает результат применения.",
+            description="Zyxel/Cudy: применить настройку. Требует confirm=true. Запрещены: erase, delete, reload, reset.",
             inputSchema=SwitchCommandArgs.model_json_schema(),
         )
     ]
@@ -76,12 +99,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return await _run_command(args)
 
     if name == "apply_switch_config":
-        if not args.confirm:
+        if not args.is_confirmed():
             return [TextContent(type="text", text="⚠️ Для выполнения команды конфигурации требуется явное подтверждение пользователя. Попросите пользователя подтвердить операцию.")]
         if not _is_safe_command(args.command, args.host):
             policy = _load_policy(args.host)
             blocked = policy.get("blocked_patterns", [])
             return [TextContent(type="text", text=f"❌ ОШИБКА БЕЗОПАСНОСТИ: Команда заблокирована. Запрещены: {', '.join(blocked[:5])}...")]
+        if not _dedup_check(args.host, args.command):
+            return [TextContent(type="text", text=f"✅ Команда уже была выполнена ранее:\n\n{args.command}\n\nПовторное выполнение отменено.")]
         result = await _run_command(args)
         await _notify_switch_config(args.host, args.command, result[0].text)
         return result
@@ -106,6 +131,9 @@ async def _run_command(args: SwitchCommandArgs) -> list[TextContent]:
         with ConnectHandler(**device) as net_connect:
             logger.info(f"Выполнение: {args.command}")
             output = net_connect.send_command(args.command, read_timeout=30)
+            output = output.strip() if output else ""
+            if not output:
+                output = "Команда выполнена успешно (устройство не возвращает вывод для команд изменения конфигурации)."
             return [TextContent(type="text", text=f"✅ Успешно на {args.host}:\n\n{output}")]
 
     except NetmikoAuthenticationException:

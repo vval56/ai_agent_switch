@@ -1030,6 +1030,13 @@
                 addMessage('system', '⏳ Агент обрабатывает запрос...');
                 document.getElementById('send-btn').disabled = true;
                 state.isProcessing = true;
+            } else if (data.type === 'thinking_update') {
+                // Обновляем системное сообщение
+                document.querySelectorAll('.system').forEach(el => {
+                    if (el.textContent.includes('обрабатывает') || el.textContent.includes('лимит') || el.textContent.includes('Жду')) {
+                        el.innerHTML = `<p>${data.message}</p>`;
+                    }
+                });
             } else if (data.type === 'thinking_end') {
                 document.querySelectorAll('.system').forEach(el => {
                     if (el.textContent.includes('обрабатывает')) el.remove();
