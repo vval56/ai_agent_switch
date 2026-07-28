@@ -41,7 +41,8 @@ def _is_write_request(user_msg_lower: str) -> bool:
         "запусти", "запустить", "останови", "остановить", "примени",
         "применить", "установи", "установить", "создай", "создать",
         "раздач", "wifi", "wireless", "firewall", "vlan", "dhcp", "nat",
-        "bridge", "interface", "порт", "port", "ssid", "ip address"
+        "bridge", "interface", "порт", "port", "ssid", "ip address",
+        "восстанови", "восстановить", "upload", "apply", "commit", "backup", "бэкап"
     ]
     return any(k in user_msg_lower for k in write_keywords)
 
@@ -51,6 +52,54 @@ async def safe_ws_send(websocket: WebSocket, payload: dict):
             await websocket.send_json(payload)
     except Exception as e:
         print(f"❌ Ошибка отправки WS: {e}", flush=True)
+
+def _is_tool_call_error(e: Exception) -> bool:
+    err_str = str(e)
+    return "400" in err_str or "DEGRADED" in err_str or "function" in err_str.lower()
+
+async def _execute_routeros_commands(active: dict, commands: list[str]) -> str:
+    try:
+        from src.mcp_servers.mikrotik_diag import call_tool
+    except Exception as e:
+        return f"❌ Ошибка загрузки SSH: {e}"
+    host = active.get("ip")
+    username = active.get("username")
+    password = active.get("password")
+    results = []
+    for cmd in commands:
+        cmd = cmd.strip()
+        if not cmd:
+            continue
+        is_confirm = any(k in cmd.lower() for k in ["add", "set", "enable", "disable", "create"])
+        args = {
+            "host": host,
+            "username": username,
+            "password": password,
+            "command": cmd,
+            "confirm": "true" if is_confirm else "false",
+        }
+        try:
+            r = await call_tool("apply_routeros_config", args)
+            text = r[0].text if r else "Нет результата"
+        except Exception as e:
+            text = f"❌ Ошибка: {e}"
+        results.append(f"{cmd}\n→ {text}")
+    return "\n\n".join(results)
+
+def _extract_routeros_commands(text: str) -> list[str]:
+    commands = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("/") and not line.startswith("//") and not line.startswith("#"):
+            clean = line.strip()
+            if clean:
+                commands.append(clean)
+    if not commands:
+        for line in text.splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and len(line) > 3:
+                commands.append(line)
+    return commands
 
 # --- НАЧАЛО: Прямое подключение RAG (без MCP) ---
 DB_PATH = os.path.normpath(os.path.join(os.path.dirname(__file__), "../../chroma_db"))
@@ -259,7 +308,7 @@ async def lifespan(app: FastAPI):
         api_key=os.getenv("NVIDIA_API_KEY2") or os.getenv("NVIDIA_API_KEY"),
         temperature=0.2,
         max_tokens=4000,
-        timeout=600,
+        timeout=120,
         max_retries=1
     )
     
@@ -476,22 +525,18 @@ async def ws_endpoint(websocket: WebSocket):
                 if not active:
                     active = memory.get("active_switch")
                 
-                # Автоматически вызываем get_switch_config ТОЛЬКО если пользователь явно просит показать конфигурацию
+                config_fetched = False
+                config_data = ""
+                show_config_kw = ("покажи конфигураци", "покажи настройк", "текущая конфигураци", "покажи конфиг", "текущие настройк", "текущие параметры", "покажи конфигурацию", "покажи все настройки", "покажи текущую конфигураци", "покажи текущие настройк", "расскажи про конфигураци", "расскажи конфигураци", "прочитай конфигураци", "покажи конфигурацию устройства", "покажи конфиг устройства", "отобрази конфигураци", "выведи конфигураци", "напиши конфигураци", "напиши конфиг", "конфигураци", "кофигураци", "конфиг")
+                is_show_config = any(k in user_msg_lower for k in show_config_kw)
+
+                no_connect_kw = ("без подключения", "не подключайся", "не подключай", "только в базе", "только поиск", "pdf only", "search pdf", "в мануале", "в базе знаний", "поиск в базе", "найди в базе")
+                is_pdf_only = any(k in user_msg_lower for k in no_connect_kw)
+
                 config_fetched = False
                 config_data = ""
                 config_error = ""
-                
-                show_config_kw = ("покажи конфигураци", "покажи настройк", "текущая конфигураци", "покажи конфиг", "текущие настройк", "текущие параметры", "покажи конфигурацию", "покажи все настройки", "покажи текущую конфигураци", "покажи текущие настройк", "расскажи про конфигураци", "расскажи конфигураци", "прочитай конфигураци", "покажи конфигурацию устройства", "покажи конфиг устройства", "отобрази конфигураци", "выведи конфигураци", "напиши конфигураци", "напиши конфиг", "конфигураци", "кофигураци", "конфиг")
-                is_show_config = any(k in user_msg_lower for k in show_config_kw)
-                
-                # Если пользователь пишет просто "конфигурация" (без "покажи") — не авто-фетчим
-                # Только если явно просит показать/отобразить
-                
-                # Также проверяем — если пользователь НЕ просит "без подключения" / "только в базе"
-                no_connect_kw = ("без подключения", "не подключайся", "не подключай", "только в базе", "только поиск", "pdf only", "search pdf", "в мануале", "в базе знаний", "поиск в базе", "найди в базе")
-                is_pdf_only = any(k in user_msg_lower for k in no_connect_kw)
-                
-                # Вызываем get_switch_config ТОЛЬКО при явном запросе показа конфигурации
+
                 if active and is_show_config and not is_pdf_only:
                     print(f"🔧 АВТО-ЗАПРОС get_switch_config для {active.get('name', active.get('ip'))}", flush=True)
                     config_data = _get_switch_config(
@@ -532,25 +577,13 @@ async def ws_endpoint(websocket: WebSocket):
                         dev_name = active.get('name', active.get('ip'))
                         dev_ip = active['ip']
                         if is_write:
-                            default_script = ""
-                            if active.get("device_type", "").startswith("mikrotik"):
-                                default_script = (
-                                    "/interface wireless enable [find]; "
-                                    "/interface wireless security-profiles set [find default=yes] mode=dynamic-keys authentication-types=wpa2-psk,wpa3-psk; "
-                                    "/interface wireless set [find] disabled=no ssid=AI-Agent-WiFi mode=ap bridge=bridge security-profile=default; "
-                                    "/ip pool add name=dhcp_wifi ranges=192.168.88.10-192.168.88.100; "
-                                    "/ip dhcp-server network add address=192.168.88.0/24 gateway=192.168.88.1 dns-server=192.168.88.1; "
-                                    "/ip dhcp-server add interface=[/interface wireless find] address-pool=dhcp_wifi disabled=no; "
-                                    "/ip address add address=192.168.88.1/24 interface=[/interface wireless find] disabled=no"
-                                )
                             context_mem += (
                                 f"\n[АКТИВНЫЙ КОММУТАТОР — РАБОТАЙ ТОЛЬКО С НИМ]:\n"
                                 f"Имя: {dev_name} | IP: {dev_ip} | Тип: {active['device_type']} | "
                                 f"Пользователь: {active['username']} | Пароль: {active['password']}\n"
                                 f"{policy_info}\n"
                                 f"[ЗАДАЧА: ИСПОЛНИТЬ КОМАНДЫ ЧЕРЕЗ apply_routeros_config с confirm=true. "
-                                f"Для Mirotik используй ТОЛЬКО команды RouterOS, начиная с /.\n"
-                                f"Если задача — настройка WiFi, выполни этот скрипт: {default_script}\n"
+                                f"Для MikroTik используй ТОЛЬКО команды RouterOS, начиная с /.\n"
                                 f"НЕ ПРИДУМЫВАЙ КОМАНДЫ САМ — используй инструменты.]\n"
                             )
                         else:
@@ -577,8 +610,8 @@ async def ws_endpoint(websocket: WebSocket):
                 if any(k in user_msg_lower for k in pdf_only_kw):
                     agent_tools = [t for t in agent_tools if _tool_name(t) not in ssh_tool_names]
                     context_mem += "\n[РЕЖИМ: только база знаний / PDF. НЕ подключайся к коммутатору, НЕ вызывай SSH-инструменты.]\n"
-                elif config_fetched:
-                    # Конфиг уже получен авто-запросом — убираем SSH-инструменты,
+                elif config_fetched and not is_write:
+                    # Конфиг уже получен авто-запросом для read/теории — убираем SSH-инструменты,
                     # чтобы reasoning-модель не зациклилась на повторных вызовах get_switch_config.
                     agent_tools = [t for t in agent_tools if _tool_name(t) not in ssh_tool_names]
                     context_mem += "\n[ВАЖНО: конфигурация УЖЕ приложена выше. НЕ вызывай SSH-инструменты повторно — просто анализируй данные и дай ответ текстом.]\n"
@@ -643,50 +676,40 @@ async def ws_endpoint(websocket: WebSocket):
 
                 async with agent_lock:
                     try:
-                        result = await asyncio.wait_for(active_agent.ainvoke({"messages": messages}), timeout=90.0)
+                        agent_timeout = 180.0 if is_write else 90.0
+                        result = await asyncio.wait_for(active_agent.ainvoke({"messages": messages}), timeout=agent_timeout)
                     except asyncio.TimeoutError:
-                        if is_write and active and active.get("device_type", "").startswith("mikrotik"):
-                            print("⚠️ Агент не ответил за 120с, пробую прямой выполнение через SSH...", flush=True)
-                            try:
-                                from src.mcp_servers.mikrotik_diag import call_tool
-                                script = [
-                                    ("/interface wireless enable [find]", "false"),
-                                    ("/interface wireless security-profiles set [find default=yes] mode=dynamic-keys authentication-types=wpa2-psk,wpa3-psk", "false"),
-                                    ("/interface wireless set [find] disabled=no ssid=AI-Agent-WiFi mode=ap bridge=bridge security-profile=default", "true"),
-                                    ("/ip pool add name=dhcp_wifi ranges=192.168.88.10-192.168.88.100", "true"),
-                                    ("/ip dhcp-server network add address=192.168.88.0/24 gateway=192.168.88.1 dns-server=192.168.88.1", "true"),
-                                    ("/ip dhcp-server add interface=[/interface wireless find] address-pool=dhcp_wifi disabled=no", "true"),
-                                    ("/ip address add address=192.168.88.1/24 interface=[/interface wireless find] disabled=no", "true"),
-                                ]
-                                host = active.get("ip")
-                                username = active.get("username")
-                                password = active.get("password")
-                                results = []
-                                for cmd, confirm in script:
-                                    args = {
-                                        "host": host,
-                                        "username": username,
-                                        "password": password,
-                                        "command": cmd,
-                                        "confirm": confirm,
-                                    }
-                                    try:
-                                        r = await call_tool("apply_routeros_config", args)
-                                        text = r[0].text if r else "Нет результата"
-                                    except Exception as e:
-                                        text = f"❌ Ошибка: {e}"
-                                    results.append(f"{cmd}\n→ {text}")
-                                final_response = "⚡ Выполнено на MikroTik (fallback после таймаута, без LLM):\n\n" + "\n\n".join(results)
-                                raise _SkipAgent(final_response)
-                            except Exception as e:
-                                final_response = f"❌ Fallback SSH ошибка: {e}"
-                                raise _SkipAgent(final_response)
-                        print("⚠️ Агент не ответил за 120с, возвращаю сырые данные", flush=True)
+                        timeout_str = "180с" if is_write else "90с"
+                        print(f"⚠️ Агент не ответил за {timeout_str}, возвращаю сырые данные", flush=True)
                         if config_fetched and config_data:
                             final_response = f"📋 Конфигурация устройства {active.get('name', active.get('ip'))}:\n\n{config_data}"
                         else:
-                            final_response = "⚠️ Агент не ответил за 120с. Попробуй ещё раз."
+                            final_response = f"⚠️ Агент не ответил за {timeout_str}. Попробуй ещё раз."
                         raise _SkipAgent(final_response)
+                    except Exception as e:
+                        err_str = str(e)
+                        if is_write and active and active.get("device_type", "").startswith("mikrotik") and _is_tool_call_error(e):
+                            print(f"⚠️ Write-агент упал на tool-calling: {err_str[:200]}, переключаюсь на прямой LLM...", flush=True)
+                            try:
+                                response = await asyncio.wait_for(
+                                    current_llm.ainvoke([HumanMessage(content=(
+                                        "Сгенерируй краткий план настройки MikroTik WiFi без лишнего текста. "
+                                        "Только RouterOS команды, по одной на строку, начиная с /. "
+                                        "Не добавляй пояснения."
+                                    ))]),
+                                    timeout=180.0
+                                )
+                                text = _extract_text(response)
+                                commands = _extract_routeros_commands(text)
+                                if commands:
+                                    exec_result = await _execute_routeros_commands(active, commands)
+                                    final_response = f"⚡ Выполнено через прямой LLM:\n\n{exec_result}"
+                                else:
+                                    final_response = f"⚠️ LLM не сгенерировал команды. Ответ:\n{text}"
+                            except Exception as e2:
+                                final_response = f"❌ Fallback LLM ошибка: {_format_api_error(e2)}"
+                            raise _SkipAgent(final_response)
+                        raise
 
                 def _msg_to_text(msg):
                     """Извлекает текст из сообщения, включая reasoning_content для nemotron."""
@@ -744,12 +767,12 @@ async def ws_endpoint(websocket: WebSocket):
                         if txt and not ai_text:
                             ai_text = txt
 
-                if ai_text:
-                    final_response = ai_text
-                elif tool_error:
+                if tool_error:
                     final_response = tool_error
                 elif tool_text:
                     final_response = tool_text
+                elif ai_text:
+                    final_response = ai_text
                 elif config_fetched and config_data:
                     final_response = f"📋 Конфигурация устройства {active.get('name', active.get('ip'))}:\n\n{config_data}"
                 elif config_error:

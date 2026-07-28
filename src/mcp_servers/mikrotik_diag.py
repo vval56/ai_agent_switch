@@ -67,7 +67,7 @@ class RouterOSConfigArgs(BaseModel):
     host: str = Field(description="IP-адрес или hostname MikroTik роутера")
     username: str = Field(description="Имя пользователя для SSH")
     password: str = Field(description="Пароль для SSH")
-    command: str = Field(description="Одна или несколько команд конфигурации. Несколько команд можно разделять символом ; или переводом строки. Пример: '/ip firewall filter add action=accept chain=input connection-state=established,related comment=\"Accept established\"; /ip firewall filter add action=accept chain=input protocol=tcp dst-port=22 comment=\"Allow SSH\"'")
+    command: str = Field(description="Одна или несколько команд конфигурации. Несколько команд можно разделять символом ; или переводом строки.\n\nПРАВИЛЬНЫЙ СИНТАКСИС RouterOS:\n- /interface wireless enable [find]\n- /interface wireless set [find] disabled=no ssid=MySSID mode=ap-bridge security-profile=default\n- /ip address add address=192.168.88.1/24 interface=ether2 (НЕ добавляй network=...)\n- /ip pool add name=dhcp_wifi ranges=192.168.88.10-192.168.88.100\n- /ip dhcp-server network add address=192.168.88.0/24 gateway=192.168.88.1 dns-server=192.168.88.1\n- /ip dhcp-server add interface=wlan1 address-pool=dhcp_wifi disabled=no\n- /interface bridge add name=bridge1\n- /interface bridge port add bridge=bridge1 interface=ether2\n\nВАЖНО:\n1. НЕ повторяй команды если вернули 'already exists' — это не ошибка\n2. mode=ap-bridge (через дефис), НЕ 'ap bridge'\n3. /ip address add НЕ принимает network=...\n4. Для remove используй /ip pool remove [find name=dhcp_wifi]")
     device_type: str = Field(default="mikrotik_routeros", description="Тип устройства: всегда 'mikrotik_routeros'")
     confirm: str = Field(default="false", description="Подтверждение опасной операции. Установите 'true' только если пользователь явно подтвердил (сказал 'да', 'подтверждаю', 'выполняй')")
 
@@ -154,6 +154,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return [TextContent(type="text", text=f"❌ ОШИБКА БЕЗОПАСНОСТИ: Команда заблокирована. Запрещены: {', '.join(blocked[:5])}...")]
         # Дедупликация: проверяем каждую команду из пачки
         raw = args.command.replace('\n', '\n').replace(';', '\n')
+        import re as _re
+        raw = _re.sub(r'\s+(?=/\s*[a-z])', '\n', raw)
         individual_cmds = [c.strip() for c in raw.split('\n') if c.strip()]
         already_done = [c for c in individual_cmds if not _dedup_check(args.host, c)]
         if already_done:
@@ -187,9 +189,10 @@ async def _run_routeros_command(args) -> list[TextContent]:
         logger.info(f"Подключение к {args.host} (RouterOS)...")
         with ConnectHandler(**device) as net_connect:
             prompt = net_connect.find_prompt().strip()
-            # Разделяем команды по ; и переводам строк
-            raw = args.command.replace('\n', '\n')
-            parts = [c.strip() for c in raw.replace(';', '\n').split('\n') if c.strip()]
+            raw = args.command.replace('\n', '\n').replace(';', '\n')
+            import re as _re
+            raw = _re.sub(r'\s+(?=/\s*[a-z])', '\n', raw)
+            parts = [c.strip() for c in raw.split('\n') if c.strip()]
             results = []
             for cmd in parts:
                 logger.info(f"Выполнение: {cmd}")
