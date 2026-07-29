@@ -1,1 +1,131 @@
-import asyncioimport loggingimport osimport sysfrom mcp.server import Serverfrom mcp.server.stdio import stdio_serverfrom mcp.types import Tool, TextContentfrom pydantic import BaseModel, Fieldfrom dotenv import load_dotenvload_dotenv()sys.path.append(os.path.normpath(os.path.join(os.path.dirname(__file__), "../..")))from src.utils import memoryfrom src.utils.telegram import notify_telegram, is_telegram_enabledlogging.basicConfig(level=logging.WARNING)logger = logging.getLogger(__name__)app = Server("memory-manager-server")class ConnectSwitchArgs(BaseModel):    host: str = Field(description="IP")    username: str = Field(description="Логин")    password: str = Field(description="Пароль")    device_type: str = Field(default="zyxel_os", description="Тип устройства")    name: str = Field(default="", description="Имя устройства")    command: str = Field(default="show version", description="Команда проверки")class GetLogsArgs(BaseModel):    host: str = Field(description="IP")    username: str = Field(description="Логин")    password: str = Field(description="Пароль")    device_type: str = Field(default="zyxel_os", description="Тип устройства")    only_errors: bool = Field(default=False, description="Отфильтровать только ошибки")class GetConfigArgs(BaseModel):    host: str = Field(description="IP")    username: str = Field(description="Логин")    password: str = Field(description="Пароль")    device_type: str = Field(default="zyxel_os", description="Тип устройства")class AddDeviceArgs(BaseModel):    name: str = Field(description="Имя устройства")    ip: str = Field(description="IP")    model: str = Field(description="Модель")    username: str = Field(description="Логин")    password: str = Field(description="Пароль")    device_type: str = Field(description="Тип: zyxel_os/mikrotik_routeros")    notes: str = Field(default="", description="Заметки")    set_active: bool = Field(default=True, description="Сделать активным")class AddLogArgs(BaseModel):    device_name: str = Field(description="Имя устройства")    issue: str = Field(description="Проблема")    solution: str = Field(description="Решение")class SearchHistoryArgs(BaseModel):    query: str = Field(description="Поисковый запрос")@app.list_tools()async def list_tools() -> list[Tool]:    return [        Tool(name="add_network_device", description="Сохранить устройство в памяти.", inputSchema=AddDeviceArgs.model_json_schema()),        Tool(name="get_network_devices", description="Список устройств в памяти.", inputSchema={"type": "object", "properties": {}}),        Tool(name="connect_switch", description="Подключиться, сделать активным.", inputSchema=ConnectSwitchArgs.model_json_schema()),        Tool(name="get_active_switch", description="Показать активное устройство.", inputSchema={"type": "object", "properties": {}}),        Tool(name="get_switch_logs", description="Прочитать логи устройства.", inputSchema=GetLogsArgs.model_json_schema()),        Tool(name="get_switch_config", description="Собрать конфигурацию устройства.", inputSchema=GetConfigArgs.model_json_schema()),        Tool(name="add_diagnostic_log", description="Записать итог диагностики в историю.", inputSchema=AddLogArgs.model_json_schema()),        Tool(name="search_diagnostic_history", description="Поиск в истории диагностик.", inputSchema=SearchHistoryArgs.model_json_schema()),    ]@app.call_tool()async def call_tool(name: str, arguments: dict) -> list[TextContent]:    try:        if name == "add_network_device":            args = AddDeviceArgs(**arguments)            res = memory.add_device(args.name, args.ip, args.model, args.username, args.password, args.device_type, args.notes)            if args.set_active:                memory.set_active_switch(args.name, args.ip, args.model, args.username, args.password, args.device_type, args.notes)                res += "\n✅ Устройство сделано активным."        elif name == "get_network_devices":            res = memory.get_devices()        elif name == "connect_switch":            args = ConnectSwitchArgs(**arguments)            out = memory.connect_to_switch(args.host, args.username, args.password, args.device_type, args.command)            if out["ok"]:                model = out["version"].strip().splitlines()[0] if out["version"].strip() else ""                dev_name = args.name or args.host                memory.set_active_switch(dev_name, args.host, model, args.username, args.password, args.device_type)                res = f"✅ {args.host} ({args.device_type}) АКТИВНО.\n\n{out['probe']}\n\nshow version:\n{out['version'][:600]}"            else:                res = f"❌ {out['error']}"        elif name == "get_active_switch":            sw = memory.get_active_switch()            if not sw:                res = "⚠️ Активный коммутатор не выбран."            else:                res = f"🟢 {sw['name']} | IP: {sw['ip']} | Тип: {sw['device_type']} | Логин: {sw['username']}"        elif name == "get_switch_logs":            args = GetLogsArgs(**arguments)            out = memory.get_switch_logs(args.host, args.username, args.password, args.device_type, args.only_errors)            if out["ok"]:                res = f"📜 Логи {args.host}:\n\n{out['logs']}"            else:                res = f"❌ {out['error']}"        elif name == "get_switch_config":            args = GetConfigArgs(**arguments)            out = memory.get_switch_config(args.host, args.username, args.password, args.device_type)            if out["ok"]:                res = f"⚙️ Конфигурация {args.host}:\n\n{out['config']}"            else:                res = f"❌ {out['error']}"        elif name == "add_diagnostic_log":            args = AddLogArgs(**arguments)            res = memory.add_diagnostic_log(args.device_name, args.issue, args.solution)        elif name == "search_diagnostic_history":            args = SearchHistoryArgs(**arguments)            res = memory.search_history(args.query)        else:            res = f"❌ Неизвестный инструмент: {name}"        return [TextContent(type="text", text=res)]    except Exception as e:        return [TextContent(type="text", text=f"❌ Ошибка: {str(e)}")]async def main():    async with stdio_server() as (read_stream, write_stream):        await app.run(read_stream, write_stream, app.create_initialization_options())if __name__ == "__main__":    asyncio.run(main())
+import asyncio
+import logging
+import os
+import sys
+from mcp.server import Server
+from mcp.server.stdio import stdio_server
+from mcp.types import Tool, TextContent
+from pydantic import BaseModel, Field
+from dotenv import load_dotenv
+
+load_dotenv()
+
+sys.path.append(os.path.normpath(os.path.join(os.path.dirname(__file__), "../..")))
+from src.utils import memory
+from src.utils.telegram import notify_telegram, is_telegram_enabled
+
+logging.basicConfig(level=logging.WARNING)
+logger = logging.getLogger(__name__)
+app = Server("memory-manager-server")
+
+class ConnectSwitchArgs(BaseModel):
+    host: str = Field(description="IP")
+    username: str = Field(description="Логин")
+    password: str = Field(description="Пароль")
+    device_type: str = Field(default="zyxel_os", description="Тип устройства")
+    name: str = Field(default="", description="Имя устройства")
+    command: str = Field(default="show version", description="Команда проверки")
+
+class GetLogsArgs(BaseModel):
+    host: str = Field(description="IP")
+    username: str = Field(description="Логин")
+    password: str = Field(description="Пароль")
+    device_type: str = Field(default="zyxel_os", description="Тип устройства")
+    only_errors: bool = Field(default=False, description="Отфильтровать только ошибки")
+
+class GetConfigArgs(BaseModel):
+    host: str = Field(description="IP")
+    username: str = Field(description="Логин")
+    password: str = Field(description="Пароль")
+    device_type: str = Field(default="zyxel_os", description="Тип устройства")
+
+class AddDeviceArgs(BaseModel):
+    name: str = Field(description="Имя устройства")
+    ip: str = Field(description="IP")
+    model: str = Field(description="Модель")
+    username: str = Field(description="Логин")
+    password: str = Field(description="Пароль")
+    device_type: str = Field(description="Тип: zyxel_os/mikrotik_routeros")
+    notes: str = Field(default="", description="Заметки")
+    set_active: bool = Field(default=True, description="Сделать активным")
+
+class AddLogArgs(BaseModel):
+    device_name: str = Field(description="Имя устройства")
+    issue: str = Field(description="Проблема")
+    solution: str = Field(description="Решение")
+
+class SearchHistoryArgs(BaseModel):
+    query: str = Field(description="Поисковый запрос")
+
+@app.list_tools()
+async def list_tools() -> list[Tool]:
+    return [
+        Tool(name="add_network_device", description="Сохранить устройство в памяти.", inputSchema=AddDeviceArgs.model_json_schema()),
+        Tool(name="get_network_devices", description="Список устройств в памяти.", inputSchema={"type": "object", "properties": {}}),
+        Tool(name="connect_switch", description="Подключиться, сделать активным.", inputSchema=ConnectSwitchArgs.model_json_schema()),
+        Tool(name="get_active_switch", description="Показать активное устройство.", inputSchema={"type": "object", "properties": {}}),
+        Tool(name="get_switch_logs", description="Прочитать логи устройства.", inputSchema=GetLogsArgs.model_json_schema()),
+        Tool(name="get_switch_config", description="Собрать конфигурацию устройства.", inputSchema=GetConfigArgs.model_json_schema()),
+        Tool(name="add_diagnostic_log", description="Записать итог диагностики в историю.", inputSchema=AddLogArgs.model_json_schema()),
+        Tool(name="search_diagnostic_history", description="Поиск в истории диагностик.", inputSchema=SearchHistoryArgs.model_json_schema()),
+    ]
+
+@app.call_tool()
+async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+    try:
+        if name == "add_network_device":
+            args = AddDeviceArgs(**arguments)
+            res = memory.add_device(args.name, args.ip, args.model, args.username, args.password, args.device_type, args.notes)
+            if args.set_active:
+                memory.set_active_switch(args.name, args.ip, args.model, args.username, args.password, args.device_type, args.notes)
+                res += "\n✅ Устройство сделано активным."
+        elif name == "get_network_devices":
+            res = memory.get_devices()
+        elif name == "connect_switch":
+            args = ConnectSwitchArgs(**arguments)
+            out = memory.connect_to_switch(args.host, args.username, args.password, args.device_type, args.command)
+            if out["ok"]:
+                model = out["version"].strip().splitlines()[0] if out["version"].strip() else ""
+                dev_name = args.name or args.host
+                memory.set_active_switch(dev_name, args.host, model, args.username, args.password, args.device_type)
+                res = f"✅ {args.host} ({args.device_type}) АКТИВНО.\n\n{out['probe']}\n\nshow version:\n{out['version'][:600]}"
+            else:
+                res = f"❌ {out['error']}"
+        elif name == "get_active_switch":
+            sw = memory.get_active_switch()
+            if not sw:
+                res = "⚠️ Активный коммутатор не выбран."
+            else:
+                res = f"🟢 {sw['name']} | IP: {sw['ip']} | Тип: {sw['device_type']} | Логин: {sw['username']}"
+        elif name == "get_switch_logs":
+            args = GetLogsArgs(**arguments)
+            out = memory.get_switch_logs(args.host, args.username, args.password, args.device_type, args.only_errors)
+            if out["ok"]:
+                res = f"📜 Логи {args.host}:\n\n{out['logs']}"
+            else:
+                res = f"❌ {out['error']}"
+        elif name == "get_switch_config":
+            args = GetConfigArgs(**arguments)
+            out = memory.get_switch_config(args.host, args.username, args.password, args.device_type)
+            if out["ok"]:
+                res = f"⚙️ Конфигурация {args.host}:\n\n{out['config']}"
+            else:
+                res = f"❌ {out['error']}"
+        elif name == "add_diagnostic_log":
+            args = AddLogArgs(**arguments)
+            res = memory.add_diagnostic_log(args.device_name, args.issue, args.solution)
+        elif name == "search_diagnostic_history":
+            args = SearchHistoryArgs(**arguments)
+            res = memory.search_history(args.query)
+        else:
+            res = f"❌ Неизвестный инструмент: {name}"
+        return [TextContent(type="text", text=res)]
+    except Exception as e:
+        return [TextContent(type="text", text=f"❌ Ошибка: {str(e)}")]
+
+async def main():
+    async with stdio_server() as (read_stream, write_stream):
+        await app.run(read_stream, write_stream, app.create_initialization_options())
+
+if __name__ == "__main__":
+    asyncio.run(main())
