@@ -42,6 +42,35 @@ def _clean_routeros_command(cmd: str) -> str:
         cmd = '/' + cmd
     return cmd
 
+def _is_rebooting_command(cmd: str) -> bool:
+    """Команды, после которых RouterOS перезагружается и SSH-сессия обрывается."""
+    c = cmd.lower().strip()
+    return "backup load" in c or c.startswith("/system reboot") or c.startswith("/system reset-configuration")
+
+
+def _routeros_expect_string(prompt: str) -> str:
+    """Regex для ожидания текущего prompt (identity может быть не MikroTik)."""
+    import re
+    p = (prompt or "").strip()
+    if not p:
+        return r"\]\s*>\s*"
+    return re.escape(p.rstrip()) + r"\s*"
+
+
+def _routeros_output_indicates_error(output: str) -> bool:
+    low = (output or "").lower()
+    markers = (
+        "failure:",
+        "syntax error",
+        "expected end",
+        "invalid value",
+        "bad command",
+        "input does not match",
+        "ambiguous command",
+    )
+    return any(m in low for m in markers)
+
+
 def _dedup_check(host: str, command: str) -> bool:
     """Проверяет, выполнялась ли уже эта команда. Если да — возвращает False.
     Нормализует ключ: убирает comment, так как RouterOS может добавлять разные комментарии."""
@@ -67,7 +96,7 @@ class RouterOSConfigArgs(BaseModel):
     host: str = Field(description="IP-адрес или hostname MikroTik роутера")
     username: str = Field(description="Имя пользователя для SSH")
     password: str = Field(description="Пароль для SSH")
-    command: str = Field(description="Одна или несколько команд конфигурации. Несколько команд можно разделять символом ; или переводом строки.\n\nПРАВИЛЬНЫЙ СИНТАКСИС RouterOS:\n- /interface wireless enable [find]\n- /interface wireless set [find] disabled=no ssid=MySSID mode=ap-bridge security-profile=default\n- /ip address add address=192.168.88.1/24 interface=ether2 (НЕ добавляй network=...)\n- /ip pool add name=dhcp_wifi ranges=192.168.88.10-192.168.88.100\n- /ip dhcp-server network add address=192.168.88.0/24 gateway=192.168.88.1 dns-server=192.168.88.1\n- /ip dhcp-server add interface=wlan1 address-pool=dhcp_wifi disabled=no\n- /interface bridge add name=bridge1\n- /interface bridge port add bridge=bridge1 interface=ether2\n\nВАЖНО:\n1. НЕ повторяй команды если вернули 'already exists' — это не ошибка\n2. mode=ap-bridge (через дефис), НЕ 'ap bridge'\n3. /ip address add НЕ принимает network=...\n4. Для remove используй /ip pool remove [find name=dhcp_wifi]")
+    command: str = Field(description="Одна или несколько команд конфигурации. Несколько команд можно разделять символом ; или переводом строки.\n\nПРАВИЛЬНЫЙ СИНТАКСИС RouterOS:\n- WiFi AP (обязательно все строки): /interface wireless security-profiles set [find default=yes] mode=dynamic-keys authentication-types=wpa2-psk wpa-pre-shared-key=ПАРОЛЬ\n- /interface wireless set [find] disabled=no mode=ap-bridge ssid=MySSID security-profile=default\n- /interface wireless enable [find]\n- /interface wireless set [find] disabled=no ssid=MySSID mode=ap-bridge security-profile=default\n- /ip address add address=192.168.88.1/24 interface=ether2 (НЕ добавляй network=...)\n- /ip pool add name=dhcp_wifi ranges=192.168.88.10-192.168.88.100\n- /ip dhcp-server network add address=192.168.88.0/24 gateway=192.168.88.1 dns-server=192.168.88.1\n- /ip dhcp-server add interface=wlan1 address-pool=dhcp_wifi disabled=no\n- /interface bridge add name=bridge1\n- /interface bridge port add bridge=bridge1 interface=ether2\n\nВАЖНО:\n1. НЕ повторяй команды если вернули 'already exists' — это не ошибка\n2. mode=ap-bridge (через дефис), НЕ 'ap bridge'\n3. /ip address add НЕ принимает network=...\n4. Для remove используй /ip pool remove [find name=dhcp_wifi]")
     device_type: str = Field(default="mikrotik_routeros", description="Тип устройства: всегда 'mikrotik_routeros'")
     confirm: str = Field(default="false", description="Подтверждение опасной операции. Установите 'true' только если пользователь явно подтвердил (сказал 'да', 'подтверждаю', 'выполняй')")
 
@@ -189,6 +218,7 @@ async def _run_routeros_command(args) -> list[TextContent]:
         logger.info(f"Подключение к {args.host} (RouterOS)...")
         with ConnectHandler(**device) as net_connect:
             prompt = net_connect.find_prompt().strip()
+            expect = _routeros_expect_string(prompt)
             raw = args.command.replace('\n', '\n').replace(';', '\n')
             import re as _re
             raw = _re.sub(r'\s+(?=/\s*[a-z])', '\n', raw)
@@ -196,12 +226,30 @@ async def _run_routeros_command(args) -> list[TextContent]:
             results = []
             for cmd in parts:
                 logger.info(f"Выполнение: {cmd}")
-                output = net_connect.send_command(cmd, read_timeout=40)
-                output = output.strip() if output else ""
-                if not output:
-                    output = "Команда выполнена успешно (RouterOS не возвращает вывод для команд изменения конфигурации)."
+                if _is_rebooting_command(cmd):
+                    output = net_connect.send_command_timing(
+                        cmd,
+                        delay_factor=4,
+                        max_loops=150,
+                    )
+                    output = (output or "").strip()
+                    if not output:
+                        output = (
+                            "Команда отправлена. RouterOS восстанавливает конфигурацию и перезагружается — "
+                            "SSH-сессия оборвана, это нормально. Подождите 1–2 минуты и проверьте устройство."
+                        )
+                else:
+                    output = net_connect.send_command(cmd, read_timeout=40, expect_string=expect)
+                    output = output.strip() if output else ""
+                    if not output and not _is_rebooting_command(cmd):
+                        output = "Команда выполнена успешно (RouterOS не возвращает вывод для команд изменения конфигурации)."
                 results.append(f"  {cmd}\n  → {output}")
-            return [TextContent(type="text", text=f"✅ Выполнено на {args.host} ({args.device_type}):\n\n" + "\n\n".join(results))]
+            body = "\n\n".join(results)
+            if any(_routeros_output_indicates_error(r.split("→", 1)[-1]) for r in results if "→" in r):
+                prefix = f"⚠️ На {args.host} ({args.device_type}) есть ошибки RouterOS:\n\n"
+            else:
+                prefix = f"✅ Выполнено на {args.host} ({args.device_type}):\n\n"
+            return [TextContent(type="text", text=prefix + body)]
 
     except NetmikoAuthenticationException:
         await _notify_routeros_error(args.host, "Ошибка аутентификации: неверный логин или пароль.")

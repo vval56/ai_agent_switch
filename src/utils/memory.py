@@ -223,6 +223,11 @@ def get_switch_config(host, username, password, device_type="zyxel_os", read_tim
         "route": ["/ip route print", "/ip route print where dynamic=no"],
         "dns": ["/ip dns print"],
         "dhcp": ["/ip dhcp-server print", "/ip dhcp-client print", "/ip dhcp-server network print"],
+        "wifi": [
+            "/interface print",
+            "/interface wireless print detail",
+            "/interface wireless security-profiles print detail",
+        ],
     }
 
     if device_type == "zyxel_os":

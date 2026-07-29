@@ -1,6 +1,7 @@
 import uuid
 import os
 import json
+import re
 import asyncio
 import shutil
 from datetime import datetime
@@ -62,29 +63,200 @@ async def _execute_routeros_commands(active: dict, commands: list[str]) -> str:
         from src.mcp_servers.mikrotik_diag import call_tool
     except Exception as e:
         return f"❌ Ошибка загрузки SSH: {e}"
+    
     host = active.get("ip")
     username = active.get("username")
     password = active.get("password")
-    results = []
-    for cmd in commands:
-        cmd = cmd.strip()
-        if not cmd:
-            continue
-        is_confirm = any(k in cmd.lower() for k in ["add", "set", "enable", "disable", "create"])
-        args = {
-            "host": host,
-            "username": username,
-            "password": password,
-            "command": cmd,
-            "confirm": "true" if is_confirm else "false",
-        }
-        try:
-            r = await call_tool("apply_routeros_config", args)
-            text = r[0].text if r else "Нет результата"
-        except Exception as e:
-            text = f"❌ Ошибка: {e}"
-        results.append(f"{cmd}\n→ {text}")
-    return "\n\n".join(results)
+    
+    # Фильтруем пустые команды
+    filtered_commands = [cmd.strip() for cmd in commands if cmd.strip()]
+    if not filtered_commands:
+        return "⚠️ Нет команд для выполнения"
+    
+    # Для отладки - выводим команды
+    print(f"🔧 Команды для выполнения ({len(filtered_commands)}):", flush=True)
+    for i, cmd in enumerate(filtered_commands, 1):
+        print(f"  {i}. {cmd}", flush=True)
+    
+    # Объединяем все команды в одну строку с разделителем новой строки
+    # MCP сервер умеет обрабатывать несколько команд за одно подключение
+    combined_command = "\n".join(filtered_commands)
+    
+    # Определяем, нужен ли confirm (если есть команды изменения конфигурации)
+    has_config_commands = any(k in combined_command.lower() for k in 
+                            ["add", "set", "enable", "disable", "create", "remove", "delete"])
+    
+    args = {
+        "host": host,
+        "username": username,
+        "password": password,
+        "command": combined_command,
+        "confirm": "true" if has_config_commands else "false",
+        "device_type": active.get("device_type", "mikrotik_routeros"),
+    }
+    
+    try:
+        r = await call_tool("apply_routeros_config", args)
+        text = r[0].text if r else "Нет результата"
+        
+        # Анализируем результат
+        if "failure:" in text.lower() or "syntax error" in text.lower() or "invalid value" in text.lower():
+            # Есть ошибки RouterOS
+            return f"⚠️ На {host} есть ошибки RouterOS:\n\n{text}"
+        elif "❌" in text:
+            # Ошибка подключения или выполнения
+            return text
+        else:
+            # Успешное выполнение
+            return text
+            
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Исключение при выполнении команд: {error_msg}", flush=True)
+        return f"❌ Ошибка выполнения команд: {error_msg}"
+
+
+def _is_mikrotik_wifi_write(user_msg_lower: str, active: dict | None, is_write: bool) -> bool:
+    if not is_write or not active:
+        return False
+    if not str(active.get("device_type", "")).startswith("mikrotik"):
+        return False
+    return any(k in user_msg_lower for k in ("wifi", "wi-fi", "вай", "wireless", "ssid", "раздач"))
+
+
+def _extract_wifi_params(user_msg: str) -> dict:
+    params = {}
+    msg_lower = user_msg.lower()
+
+    password_patterns = [
+        r"пароль\s+(\S+)",
+        r"password\s+(\S+)",
+        r"psk\s+(\S+)",
+        r"ключ\s+(\S+)",
+        r"wpa-pre-shared-key\s+(\S+)",
+        r"пароль:\s*(\S+)",
+        r"password:\s*(\S+)",
+        r"пароль\s+([^\s,;]+)",  # Более гибкий паттерн
+        r"password\s+([^\s,;]+)",
+        r"wpa.*key[=:\s]+(\S+)",
+    ]
+    for pattern in password_patterns:
+        m = re.search(pattern, msg_lower)
+        if m:
+            params["password"] = m.group(1)
+            # Убираем возможные кавычки
+            params["password"] = params["password"].strip('"\'').strip()
+            break
+
+    ssid_patterns = [
+        r"название\s+(?:сети|ssid|wifi)\s+(\S+)",
+        r"ssid\s+(\S+)",
+        r"сеть\s+(\S+)",
+        r"имя\s+(?:сети|ssid|wifi)\s+(\S+)",
+        r"название[:\s]+(\S+)",
+        r"названи[ея]\s+сет[ии]\s+(\S+)",
+        r"сеть[:\s]+(\S+)",
+        r"название\s+сети\s+([^\s,;]+)",
+        r"сеть\s+([^\s,;]+)",
+        r"ssid[=:\s]+(\S+)",
+    ]
+    for pattern in ssid_patterns:
+        m = re.search(pattern, msg_lower)
+        if m:
+            params["ssid"] = m.group(1)
+            # Убираем возможные кавычки
+            params["ssid"] = params["ssid"].strip('"\'').strip()
+            break
+
+    profile_patterns = [
+        r"profile\s+(\S+)",
+        r"профиль\s+(\S+)",
+        r"security-profile\s+(\S+)",
+        r"профиль[:\s]+(\S+)",
+    ]
+    for pattern in profile_patterns:
+        m = re.search(pattern, msg_lower)
+        if m:
+            params["profile"] = m.group(1)
+            params["profile"] = params["profile"].strip('"\'').strip()
+            break
+    
+    # Если не указан профиль, используем дефолтный
+    if "profile" not in params:
+        params["profile"] = "default"
+
+    mode_patterns = [
+        r"режим\s+(\S+)",
+        r"mode\s+(\S+)",
+        r"режим[:\s]+(\S+)",
+    ]
+    for pattern in mode_patterns:
+        m = re.search(pattern, msg_lower)
+        if m:
+            mode_val = m.group(1).lower()
+            # Нормализуем режим
+            if "dynamic" in mode_val:
+                params["mode"] = "dynamic-keys"
+            elif "static" in mode_val:
+                params["mode"] = "static-keys"
+            else:
+                params["mode"] = "dynamic-keys"  # default
+            break
+    
+    if "mode" not in params:
+        params["mode"] = "dynamic-keys"
+
+    auth_patterns = [
+        r"аунтетификации?\s+(\S+)",
+        r"аутентификации?\s+(\S+)",
+        r"authentication\s+(\S+)",
+        r"тип\s+аутентификации?\s+(\S+)",
+        r"тип[:\s]+(\S+)",
+        r"authentication[-\s]types?\s+(\S+)",
+    ]
+    for pattern in auth_patterns:
+        m = re.search(pattern, msg_lower)
+        if m:
+            val = m.group(1).lower()
+            if "wpa2" in val or "wpa2-psk" in val:
+                params["auth_type"] = "wpa2-psk"
+            elif "wpa" in val:
+                params["auth_type"] = "wpa-psk"
+            else:
+                params["auth_type"] = "wpa2-psk"  # default
+            break
+    
+    if "auth_type" not in params:
+        params["auth_type"] = "wpa2-psk"
+
+    antenna_patterns = [
+        r"антенна\s+(\d+)",
+        r"antenna-gain\s+(\d+)",
+        r"gain\s+(\d+)",
+        r"мощность\s+(\d+)",
+        r"сигнал\s+(\d+)",
+        r"antenna[-\s]gain[:\s]+(\d+)",
+    ]
+    for pattern in antenna_patterns:
+        m = re.search(pattern, msg_lower)
+        if m:
+            gain = m.group(1)
+            # Проверяем, что это число
+            if gain.isdigit():
+                gain_int = int(gain)
+                # Ограничиваем разумными значениями
+                if gain_int < 0:
+                    gain_int = 0
+                elif gain_int > 30:
+                    gain_int = 30
+                params["antenna_gain"] = str(gain_int)
+            break
+
+    if "antenna_gain" not in params:
+        params["antenna_gain"] = "14"
+
+    return params
+
 
 def _extract_routeros_commands(text: str) -> list[str]:
     commands = []
@@ -100,6 +272,151 @@ def _extract_routeros_commands(text: str) -> list[str]:
             if line and not line.startswith("#") and len(line) > 3:
                 commands.append(line)
     return commands
+
+
+async def _configure_mikrotik_wifi_directly(active: dict, wifi_params: dict) -> str:
+    """Прямая настройка WiFi на MikroTik без использования LLM"""
+    import asyncio
+    
+    # Извлекаем параметры с дефолтными значениями
+    password = wifi_params.get("password", "")
+    ssid = wifi_params.get("ssid", "Switch")
+    profile = wifi_params.get("profile", "default")
+    mode = wifi_params.get("mode", "dynamic-keys")
+    auth_type = wifi_params.get("auth_type", "wpa2-psk")
+    antenna_gain = wifi_params.get("antenna_gain", "14")
+    
+    # Проверяем обязательные параметры
+    if not password:
+        return "❌ Ошибка: не указан пароль для WiFi"
+    
+    # Проверяем длину пароля для WPA2-PSK
+    if len(password) < 9:
+        return f"❌ Ошибка: пароль для WPA2-PSK должен быть минимум 9 символов (RouterOS v7 требует >8, получено: {len(password)}). Используйте пароль длиной 9-64 символа."
+    if len(password) > 64:  # RouterOS ограничение 64 символа
+        return f"❌ Ошибка: пароль слишком длинный (максимум 64 символа, получено: {len(password)})"
+    
+    # Проверяем специальные символы в пароле - RouterOS может быть чувствителен
+    # Лучше использовать только буквы, цифры и базовые символы
+    invalid_chars = ['"', "'", ';', '\\', '`', '$', '&', '|', '<', '>']
+    for char in invalid_chars:
+        if char in password:
+            return f"❌ Ошибка: пароль содержит недопустимый символ '{char}'"
+    
+    # Проверяем, что пароль состоит из печатных ASCII символов
+    try:
+        password.encode('ascii')
+    except UnicodeEncodeError:
+        return "❌ Ошибка: пароль должен содержать только ASCII символы"
+    
+    print(f"🔧 Прямая настройка WiFi с параметрами:", flush=True)
+    print(f"  SSID: {ssid}", flush=True)
+    print(f"  Пароль: {password}", flush=True)
+    print(f"  Профиль: {profile}", flush=True)
+    print(f"  Режим: {mode}", flush=True)
+    print(f"  Тип аутентификации: {auth_type}", flush=True)
+    print(f"  Мощность антенны: {antenna_gain}", flush=True)
+    
+    # Сначала получим текущую конфигурацию, чтобы понять состояние
+    try:
+        check_cmds = [
+            "/interface wireless security-profiles print detail",
+            "/interface wireless print detail"
+        ]
+        
+        print(f"🔧 Проверяю текущую конфигурацию...", flush=True)
+        current_config = await _execute_routeros_commands(active, check_cmds)
+        
+        # Анализируем текущую конфигурацию
+        if "mode=none" in current_config.lower() and "authentication-types=wpa2-psk" in current_config.lower():
+            print(f"⚠️ Обнаружен профиль с mode=none но с wpa2-psk", flush=True)
+            # Нужно пересоздать профиль или исправить режим
+            commands = []
+            
+            # Вариант 1: Удалить и создать новый профиль
+            # /interface wireless security-profiles remove [find name=default]
+            # /interface wireless security-profiles add name=default mode=dynamic-keys authentication-types=wpa2-psk wpa-pre-shared-key=пароль
+            
+            # Вариант 2: Исправить существующий профиль правильно
+            # Для WPA2-PSK нужно использовать wpa2-pre-shared-key
+            commands.append("/interface wireless security-profiles set [find name=default] mode=dynamic-keys authentication-types=wpa2-psk")
+            commands.append(f"/interface wireless security-profiles set [find name=default] wpa2-pre-shared-key={password}")
+            
+        else:
+            # Обычная настройка
+            commands = []
+            
+            # 1. Настраиваем security profile
+            # Для WPA2-PSK используем wpa2-pre-shared-key
+            commands.append(
+                f"/interface wireless security-profiles set [find name=default] "
+                f"mode={mode} authentication-types={auth_type} wpa2-pre-shared-key={password}"
+            )
+        
+        # 2. Настраиваем беспроводной интерфейс
+        commands.append(
+            f"/interface wireless set [find] disabled=no mode=ap-bridge ssid={ssid} "
+            f"security-profile={profile} antenna-gain={antenna_gain}"
+        )
+        
+        # 3. Включаем интерфейс
+        commands.append("/interface wireless enable [find]")
+        
+        print(f"🔧 Выполняю {len(commands)} команд настройки WiFi", flush=True)
+        for i, cmd in enumerate(commands, 1):
+            print(f"  {i}. {cmd}", flush=True)
+        
+        exec_result = await _execute_routeros_commands(active, commands)
+        
+        # Проверяем наличие ошибок
+        if "❌" in exec_result or "failure:" in exec_result.lower():
+            # Пробуем альтернативный подход - удалить и создать заново
+            print(f"⚠️ Первый подход не сработал, пробую альтернативный...", flush=True)
+            
+            alt_commands = [
+                f"/interface wireless security-profiles remove [find name=default]",
+                f"/interface wireless security-profiles add name=default mode={mode} authentication-types={auth_type} wpa2-pre-shared-key={password}",
+                f"/interface wireless set [find] disabled=no mode=ap-bridge ssid={ssid} security-profile=default antenna-gain={antenna_gain}",
+                f"/interface wireless enable [find]"
+            ]
+            
+            print(f"🔧 Выполняю альтернативные команды ({len(alt_commands)})", flush=True)
+            alt_result = await _execute_routeros_commands(active, alt_commands)
+            
+            if "❌" in alt_result or "failure:" in alt_result.lower():
+                return f"❌ Ошибка при настройке WiFi (оба подхода не сработали):\n\nПервый подход:\n{exec_result}\n\nВторой подход:\n{alt_result}"
+            
+            exec_result = alt_result
+        
+        # Ждем немного для применения настроек
+        await asyncio.sleep(1)
+        
+        # Проверяем результат
+        check_result = await _execute_routeros_commands(active, [
+            "/interface wireless security-profiles print detail",
+            "/interface wireless print detail"
+        ])
+        
+        # Формируем отчет
+        summary = f"🔧 Настройка WiFi завершена:\n"
+        summary += f"- SSID: {ssid}\n"
+        summary += f"- Пароль: {'установлен' if password else 'не установлен'}\n"
+        summary += f"- Мощность антенны: {antenna_gain}\n\n"
+        
+        summary += f"Результат выполнения:\n{exec_result}\n\n"
+        summary += f"Проверка конфигурации:\n{check_result}"
+        
+        # Проверяем, есть ли пароль в security profile
+        if password and password.lower() not in check_result.lower():
+            summary += f"\n⚠️ Внимание: пароль не найден в конфигурации security profile"
+        
+        if "disabled=yes" in check_result.lower():
+            summary += f"\n⚠️ Внимание: беспроводной интерфейс отключен"
+        
+        return summary
+        
+    except Exception as e:
+        return f"❌ Исключение при настройке WiFi:\nОшибка: {str(e)}\n\nТип ошибки: {type(e).__name__}"
 
 # --- НАЧАЛО: Прямое подключение RAG (без MCP) ---
 DB_PATH = os.path.normpath(os.path.join(os.path.dirname(__file__), "../../chroma_db"))
@@ -510,6 +827,38 @@ async def ws_endpoint(websocket: WebSocket):
             is_write = _is_write_request(user_msg_lower)
             current_llm = llm_write if is_write else llm
             print(f"🔄 Использую агента... (тип: {'write' if is_write else 'read'}, LLM: {'NVIDIA' if is_write else 'Groq'})", flush=True)
+            
+            # Прямая обработка WiFi запросов для MikroTik
+            try:
+                memory = load_memory()
+                active = None
+                if device_id:
+                    devices = memory.get("devices", [])
+                    for idx, dev in enumerate(devices):
+                        dev_id = str(dev.get("id", ""))
+                        dev_ip = str(dev.get("ip", ""))
+                        if dev_id == str(device_id) or dev_ip == str(device_id) or str(idx) == str(device_id):
+                            active = dev
+                            break
+                if not active:
+                    active = memory.get("active_switch")
+                
+                if active and is_write and _is_mikrotik_wifi_write(user_msg_lower, active, is_write):
+                    wifi_params = _extract_wifi_params(user_msg)
+                    if "password" in wifi_params:
+                        print(f"🔧 ПРЯМАЯ НАСТРОЙКА WiFi для {active.get('name', active.get('ip'))}", flush=True)
+                        print(f"🔧 Использую улучшенную логику для MikroTik WiFi", flush=True)
+                        try:
+                            result = await _configure_mikrotik_wifi_directly(active, wifi_params)
+                            raise _SkipAgent(result)
+                        except _SkipAgent:
+                            raise
+                        except Exception as e:
+                            print(f"❌ Ошибка прямой настройки WiFi: {e}, продолжаем с LLM", flush=True)
+                            # Продолжаем с обычной обработкой через LLM
+            except Exception as e:
+                print(f"⚠️ Ошибка при проверке прямой обработки WiFi: {e}", flush=True)
+            
             try:
                 memory = load_memory()
                 context_mem = ""
@@ -536,6 +885,33 @@ async def ws_endpoint(websocket: WebSocket):
                 config_fetched = False
                 config_data = ""
                 config_error = ""
+
+                if (
+                    active
+                    and not is_pdf_only
+                    and _is_mikrotik_wifi_write(user_msg_lower, active, is_write)
+                    and not config_fetched
+                ):
+                    print(
+                        f"🔧 АВТО-ЗАПРОС get_switch_config (wifi) для {active.get('name', active.get('ip'))}",
+                        flush=True,
+                    )
+                    config_data = _get_switch_config(
+                        active["ip"],
+                        active["username"],
+                        active["password"],
+                        active.get("device_type", "mikrotik_routeros"),
+                        topic="wifi",
+                    )
+                    if isinstance(config_data, dict):
+                        if config_data.get("ok"):
+                            config_fetched = True
+                            config_data = config_data.get("config", "Нет данных")
+                        else:
+                            config_error = config_data.get("error", "Неизвестная ошибка")
+                    else:
+                        config_fetched = True
+                        config_data = str(config_data)
 
                 if active and is_show_config and not is_pdf_only:
                     print(f"🔧 АВТО-ЗАПРОС get_switch_config для {active.get('name', active.get('ip'))}", flush=True)
@@ -565,26 +941,88 @@ async def ws_endpoint(websocket: WebSocket):
                         policy_info = f"\n[ПОЛИТИКА КОМАНД ДЛЯ MikroTik]:\n  Разрешённые: {', '.join(readonly[:8])}...\n  Заблокировано: {', '.join(blocked[:8])}...\n"
                     
                     if config_fetched:
+                        wifi_write_hint = ""
+                        if is_write and _is_mikrotik_wifi_write(user_msg_lower, active, is_write):
+                            wifi_params = _extract_wifi_params(user_msg)
+                            param_lines = []
+                            if "password" in wifi_params:
+                                param_lines.append(f"wpa-pre-shared-key={wifi_params['password']}")
+                            if "ssid" in wifi_params:
+                                param_lines.append(f"ssid={wifi_params['ssid']}")
+                            if "profile" in wifi_params:
+                                param_lines.append(f"security-profile={wifi_params['profile']}")
+                            if "mode" in wifi_params:
+                                param_lines.append(f"mode={wifi_params['mode']}")
+                            if "auth_type" in wifi_params:
+                                param_lines.append(f"authentication-types={wifi_params['auth_type']}")
+                            if "antenna_gain" in wifi_params:
+                                param_lines.append(f"antenna-gain={wifi_params['antenna_gain']}")
+                            params_hint = " ".join(param_lines)
+                            wifi_write_hint = (
+                                f"[ЗАДАЧА WiFi]:\n"
+                                f"ВНИМАНИЕ: ПАРАМЕТРЫ ИЗ СООБЩЕНИЯ ПОЛЬЗОВАТЕЛЯ — НЕ ИЗМЕНЯЙ ИХ:\n"
+                                f"  {params_hint}\n"
+                                f"План действий:\n"
+                                f"  1) Прочитай текущий конфиг выше и запомни текущие значения wlan и security-profile.\n"
+                                f"  2) Составь ПОЛНЫЙ план всех команд ДО их выполнения.\n"
+                                f"  3) Примени через apply_routeros_config (confirm=true) — ОТДЕЛЬНАЯ команда на каждую строку, не склеивай.\n"
+                                f"  4) Порядок: (a) security-profile: mode=dynamic-keys, authentication-types=wpa2-psk, wpa-pre-shared-key={wifi_params.get('password', '...')} (b) wireless: disabled=no, mode=ap-bridge, ssid={wifi_params.get('ssid', '...')}, security-profile={wifi_params.get('profile', 'default')}, antenna-gain={wifi_params.get('antenna_gain', '14')}.\n"
+                                f"  5) Проверь: /interface wireless security-profiles print detail — если authentication-types пустой или нет wpa2-psk, сеть будет БЕЗ пароля; исправь и проверь снова.\n"
+                                f"  6) Проверь: /interface wireless print detail — убедись что antenna-gain не 0 (0 = максимальное приглушение, 14 = минимальное затухание = максимальный сигнал).\n"
+                                f"  7) Кратко объясни пользователю что изменил и что показала проверка.\n"
+                                f"НЕ ИСПОЛЬЗУЙ ДРУГИЕ ЗНАЧЕНИЯ ПАРАМЕТРОВ КРОМЕ УКАЗАННЫХ ВЫШЕ!\n"
+                            )
+                        elif is_write:
+                            wifi_write_hint = (
+                                "[ЗАДАЧА: проанализируй конфиг, составь план, примени через apply_routeros_config (confirm=true). "
+                                "После изменений проверь результат read-командами.]\n"
+                            )
+                        else:
+                            wifi_write_hint = (
+                                "[ЗАДАЧА: АНАЛИЗИРУЙ ТОЛЬКО РЕАЛЬНУЮ КОНФИГУРАЦИЮ ВЫШЕ. НЕ СИМУЛИРУЙ.]\n"
+                            )
                         context_mem += (
                             f"\n[АКТИВНЫЙ КОММУТАТОР — РАБОТАЙ ТОЛЬКО С НИМ]:\n"
                             f"Имя: {active.get('name', active.get('ip'))} | IP: {active['ip']} | Тип: {active['device_type']} | "
                             f"Пользователь: {active['username']} | Пароль: {active['password']}\n"
                             f"{policy_info}\n"
                             f"=== РЕАЛЬНАЯ КОНФИГУРАЦИЯ (ПОЛУЧЕНА ПО SSH) ===\n{config_data}\n=== КОНЕЦ КОНФИГУРАЦИИ ===\n"
-                            f"[ЗАДАЧА: АНАЛИЗИРУЙ ТОЛЬКО РЕАЛЬНУЮ КОНФИГУРАЦИЮ ВЫШЕ. НЕ СИМУЛИРУЙ, НЕ ПРИДУМЫВАЙ. ПРЕДЛАГАЙ КОНКРЕТНЫЕ УЛУЧШЕНИЯ НА ОСНОВЕ ДАННЫХ.]\n"
+                            f"{wifi_write_hint}"
                         )
                     else:
                         dev_name = active.get('name', active.get('ip'))
                         dev_ip = active['ip']
                         if is_write:
+                            wifi_params_hint = ""
+                            if _is_mikrotik_wifi_write(user_msg_lower, active, is_write):
+                                wifi_params = _extract_wifi_params(user_msg)
+                                param_parts = []
+                                if "password" in wifi_params:
+                                    param_parts.append(f"wpa-pre-shared-key={wifi_params['password']}")
+                                if "ssid" in wifi_params:
+                                    param_parts.append(f"ssid={wifi_params['ssid']}")
+                                if "profile" in wifi_params:
+                                    param_parts.append(f"security-profile={wifi_params['profile']}")
+                                if "mode" in wifi_params:
+                                    param_parts.append(f"mode={wifi_params['mode']}")
+                                if "auth_type" in wifi_params:
+                                    param_parts.append(f"authentication-types={wifi_params['auth_type']}")
+                                if "antenna_gain" in wifi_params:
+                                    param_parts.append(f"antenna-gain={wifi_params['antenna_gain']}")
+                                if param_parts:
+                                    wifi_params_hint = (
+                                        f"\n[ПАРАМЕТРЫ WiFi ИЗ СООБЩЕНИЯ — НЕ ИЗМЕНЯЙ ИХ]:\n"
+                                        f"  {' '.join(param_parts)}\n"
+                                        f"План: 1) get_switch_config (wireless) 2) Составь план команд 3) Примени через apply_routeros_config (confirm=true) "
+                                        f"4) Проверь результат. НЕ выполняй команды без плана!"
+                                    )
                             context_mem += (
                                 f"\n[АКТИВНЫЙ КОММУТАТОР — РАБОТАЙ ТОЛЬКО С НИМ]:\n"
                                 f"Имя: {dev_name} | IP: {dev_ip} | Тип: {active['device_type']} | "
                                 f"Пользователь: {active['username']} | Пароль: {active['password']}\n"
                                 f"{policy_info}\n"
-                                f"[ЗАДАЧА: ИСПОЛНИТЬ КОМАНДЫ ЧЕРЕЗ apply_routeros_config с confirm=true. "
-                                f"Для MikroTik используй ТОЛЬКО команды RouterOS, начиная с /.\n"
-                                f"НЕ ПРИДУМЫВАЙ КОМАНДЫ САМ — используй инструменты.]\n"
+                                f"[ЗАДАЧА: сначала execute_routeros_command или get_switch_config (wireless), "
+                                f"затем apply_routeros_config с confirm=true. Не выполняй вслепую — смотри текущий конфиг.{wifi_params_hint}]\n"
                             )
                         else:
                             context_mem += (

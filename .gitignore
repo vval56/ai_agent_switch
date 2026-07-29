@@ -40,3 +40,4 @@ skills-lock.json
 
 # Kilo agent config
 .kilo/
+.aider*
