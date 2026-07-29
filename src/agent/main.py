@@ -4,6 +4,7 @@ import json
 import re
 import asyncio
 import shutil
+import time
 from datetime import datetime
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
@@ -57,6 +58,62 @@ async def safe_ws_send(websocket: WebSocket, payload: dict):
 def _is_tool_call_error(e: Exception) -> bool:
     err_str = str(e)
     return "400" in err_str or "DEGRADED" in err_str or "function" in err_str.lower()
+
+
+def _get_tokenizer():
+    try:
+        import tiktoken
+        return tiktoken.encoding_for_model("gpt-4o")
+    except Exception:
+        return None
+
+
+def _count_tokens(text: str) -> int:
+    if not text:
+        return 0
+    enc = _get_tokenizer()
+    if enc:
+        try:
+            return len(enc.encode(text))
+        except Exception:
+            pass
+    return max(1, len(text) // 4)
+
+
+def _truncate_text(text: str, max_tokens: int) -> str:
+    if _count_tokens(text) <= max_tokens:
+        return text
+    enc = _get_tokenizer()
+    if enc:
+        try:
+            tokens = enc.encode(text)
+            truncated = enc.decode(tokens[:max_tokens])
+            return truncated + "\n\n... (обрезано по токенам)"
+        except Exception:
+            pass
+    approx_chars = max_tokens * 4
+    return text[:approx_chars] + "\n\n... (обрезано по токенам)"
+
+
+async def _retry_call(coro_factory, max_retries=3, timeout=180.0):
+    for attempt in range(max_retries):
+        try:
+            return await asyncio.wait_for(coro_factory(), timeout=timeout)
+        except Exception as e:
+            err_str = str(e)
+            is_rate_limit = (
+                "429" in err_str or
+                "rate_limit" in err_str.lower() or
+                "tokens per minute" in err_str.lower() or
+                "Request too large" in err_str
+            )
+            if is_rate_limit and attempt < max_retries - 1:
+                wait = min(2 ** attempt, 10)
+                print(f"⏳ Rate limit/размер запроса (попытка {attempt+1}/{max_retries}), жду {wait}с...", flush=True)
+                await asyncio.sleep(wait)
+                continue
+            raise
+
 
 async def _execute_routeros_commands(active: dict, commands: list[str]) -> str:
     try:
@@ -1071,6 +1128,34 @@ async def ws_endpoint(websocket: WebSocket):
                 messages.append(HumanMessage(content=user_msg + context_mem))
                 input_messages_count = len(messages)
                 
+                # Ограничиваем общее количество токенов во входных данных
+                MAX_INPUT_TOKENS = int(os.getenv("MAX_INPUT_TOKENS", "8000"))
+                total_input_tokens = sum(_count_tokens(getattr(m, "content", "") or "") for m in messages)
+                if total_input_tokens > MAX_INPUT_TOKENS:
+                    print(f"⚠️ Вход слишком большой ({total_input_tokens} токенов), обрезаю до {MAX_INPUT_TOKENS}...", flush=True)
+                    budget = MAX_INPUT_TOKENS
+                    for i in range(len(messages) - 1, -1, -1):
+                        content = getattr(messages[i], "content", "") or ""
+                        tokens = _count_tokens(content)
+                        if tokens > budget:
+                            new_content = _truncate_text(content, max(1, budget))
+                            if isinstance(messages[i], HumanMessage):
+                                messages[i] = HumanMessage(content=new_content)
+                            elif isinstance(messages[i], SystemMessage):
+                                messages[i] = SystemMessage(content=new_content)
+                            elif isinstance(messages[i], AIMessage):
+                                messages[i] = AIMessage(content=new_content)
+                            budget = 0
+                            break
+                        else:
+                            budget -= tokens
+                    # Если всё ещё не влезло — обрезаем историю с начала
+                    total_input_tokens = sum(_count_tokens(getattr(m, "content", "") or "") for m in messages)
+                    while total_input_tokens > MAX_INPUT_TOKENS and len(messages) > 2:
+                        removed = messages.pop(1)
+                        total_input_tokens = sum(_count_tokens(getattr(m, "content", "") or "") for m in messages)
+                    print(f"✂️ После обрезки: {total_input_tokens} токенов, {len(messages)} сообщений", flush=True)
+                
                 # Обрезаем конфиг если он слишком большой (чтобы не висеть на 70B модели)
                 MAX_CONFIG_CHARS = 4000
                 if config_fetched and len(config_data) > MAX_CONFIG_CHARS:
@@ -1090,10 +1175,14 @@ async def ws_endpoint(websocket: WebSocket):
                         f"Используй таблицы для наглядности. Не выдумывай данные."
                     )
                     try:
-                        direct_result = await asyncio.wait_for(current_llm.ainvoke([
-                            SystemMessage(content="Ты — старший сетевой инженер. Отвечай по-русски, используй таблицы где уместно."),
-                            HumanMessage(content=format_prompt)
-                        ]), timeout=120.0)
+                        direct_result = await _retry_call(
+                            lambda: current_llm.ainvoke([
+                                SystemMessage(content="Ты — старший сетевой инженер. Отвечай по-русски, используй таблицы где уместно."),
+                                HumanMessage(content=format_prompt)
+                            ]),
+                            max_retries=3,
+                            timeout=120.0
+                        )
                         direct_text = direct_result.content.strip() if isinstance(direct_result.content, str) else str(direct_result.content)
                         if direct_text and len(direct_text) > 20:
                             final_response = direct_text
@@ -1115,7 +1204,11 @@ async def ws_endpoint(websocket: WebSocket):
                 async with agent_lock:
                     try:
                         agent_timeout = 180.0 if is_write else 90.0
-                        result = await asyncio.wait_for(active_agent.ainvoke({"messages": messages}), timeout=agent_timeout)
+                        result = await _retry_call(
+                            lambda: active_agent.ainvoke({"messages": messages}),
+                            max_retries=3,
+                            timeout=agent_timeout
+                        )
                     except asyncio.TimeoutError:
                         timeout_str = "180с" if is_write else "90с"
                         print(f"⚠️ Агент не ответил за {timeout_str}, возвращаю сырые данные", flush=True)
@@ -1129,12 +1222,13 @@ async def ws_endpoint(websocket: WebSocket):
                         if is_write and active and active.get("device_type", "").startswith("mikrotik") and _is_tool_call_error(e):
                             print(f"⚠️ Write-агент упал на tool-calling: {err_str[:200]}, переключаюсь на прямой LLM...", flush=True)
                             try:
-                                response = await asyncio.wait_for(
-                                    current_llm.ainvoke([HumanMessage(content=(
+                                response = await _retry_call(
+                                    lambda: current_llm.ainvoke([HumanMessage(content=(
                                         "Сгенерируй краткий план настройки MikroTik WiFi без лишнего текста. "
                                         "Только RouterOS команды, по одной на строку, начиная с /. "
                                         "Не добавляй пояснения."
                                     ))]),
+                                    max_retries=3,
                                     timeout=180.0
                                 )
                                 text = _extract_text(response)
