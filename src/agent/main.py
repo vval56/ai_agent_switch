@@ -48,6 +48,23 @@ def _is_write_request(user_msg_lower: str) -> bool:
     ]
     return any(k in user_msg_lower for k in write_keywords)
 
+
+def _is_simple_read_request(user_msg_lower: str) -> bool:
+    simple_keywords = [
+        "статистик", "статус", "uptime", "нагрузка", "трафик", "порт",
+        "port", "соединен", "connection", "established", "запущен",
+        "running", "интерфейс", "interface", "ip address", "ip addr",
+        "маршрут", "route", "vlan", "показать", "покажи", "отобрази",
+        "выведи", "напиши", "расскажи", "сколько", "какой", "какая",
+        "какие", "что", "где", "когда", "айпи", "ip ", "мак",
+        "mac", "arp", "таблица", "таблиц", "лог", "log", "журнал",
+        "ошибк", "error", "warn", "fail", "down", "включен",
+        "выключен", "disable", "enable", "link", "статус порта",
+        "порт", "port status", "sfp", "оптик", " fiber"
+    ]
+    return any(k in user_msg_lower for k in simple_keywords)
+
+
 async def safe_ws_send(websocket: WebSocket, payload: dict):
     try:
         if websocket.client_state == WebSocketState.CONNECTED:
@@ -58,6 +75,7 @@ async def safe_ws_send(websocket: WebSocket, payload: dict):
 def _is_tool_call_error(e: Exception) -> bool:
     err_str = str(e)
     return "400" in err_str or "DEGRADED" in err_str or "function" in err_str.lower()
+
 
 
 def _get_tokenizer():
@@ -95,7 +113,7 @@ def _truncate_text(text: str, max_tokens: int) -> str:
     return text[:approx_chars] + "\n\n... (обрезано по токенам)"
 
 
-async def _retry_call(coro_factory, max_retries=3, timeout=180.0):
+async def _retry_call(coro_factory, max_retries=3, timeout=180.0, fallback=None):
     for attempt in range(max_retries):
         try:
             return await asyncio.wait_for(coro_factory(), timeout=timeout)
@@ -105,13 +123,34 @@ async def _retry_call(coro_factory, max_retries=3, timeout=180.0):
                 "429" in err_str or
                 "rate_limit" in err_str.lower() or
                 "tokens per minute" in err_str.lower() or
-                "Request too large" in err_str
+                "tokens per day" in err_str.lower() or
+                "Request too large" in err_str or
+                "TPD" in err_str or
+                "TPM" in err_str
             )
             if is_rate_limit and attempt < max_retries - 1:
                 wait = min(2 ** attempt, 10)
                 print(f"⏳ Rate limit/размер запроса (попытка {attempt+1}/{max_retries}), жду {wait}с...", flush=True)
                 await asyncio.sleep(wait)
                 continue
+            if is_rate_limit and fallback is not None:
+                print(f"🔄 Переключаюсь на резервный LLM (NVIDIA)...", flush=True)
+                try:
+                    return await asyncio.wait_for(fallback(), timeout=timeout)
+                except Exception as e2:
+                    err_str2 = str(e2)
+                    is_rate_limit2 = (
+                        "429" in err_str2 or
+                        "rate_limit" in err_str2.lower() or
+                        "tokens per minute" in err_str2.lower() or
+                        "tokens per day" in err_str2.lower() or
+                        "Request too large" in err_str2 or
+                        "TPD" in err_str2 or
+                        "TPM" in err_str2
+                    )
+                    if is_rate_limit2:
+                        raise Exception(f"Оба LLM исчерпали лимит. Первый: {err_str}. Резервный: {err_str2}")
+                    raise e2
             raise
 
 
@@ -882,9 +921,13 @@ async def ws_endpoint(websocket: WebSocket):
             final_response = "⚠️ Произошла неизвестная ошибка при обработке запроса."
             user_msg_lower = user_msg.lower()
             is_write = _is_write_request(user_msg_lower)
+            is_simple_read = not is_write and _is_simple_read_request(user_msg_lower)
             current_llm = llm_write if is_write else llm
-            print(f"🔄 Использую агента... (тип: {'write' if is_write else 'read'}, LLM: {'NVIDIA' if is_write else 'Groq'})", flush=True)
+            print(f"🔄 Использую агента... (тип: {'write' if is_write else 'simple_read' if is_simple_read else 'read'}, LLM: {'NVIDIA' if is_write else 'Groq'})", flush=True)
             
+            show_config_kw = ("покажи конфигураци", "покажи настройк", "текущая конфигураци", "покажи конфиг", "текущие настройк", "текущие параметры", "покажи конфигурацию", "покажи все настройки", "покажи текущую конфигураци", "покажи текущие настройк", "расскажи про конфигураци", "расскажи конфигураци", "прочитай конфигураци", "покажи конфигурацию устройства", "покажи конфиг устройства", "отобрази конфигураци", "выведи конфигураци", "напиши конфигураци", "напиши конфиг", "конфигураци", "кофигураци", "конфиг")
+            is_show_config = any(k in user_msg_lower for k in show_config_kw)
+
             # Прямая обработка WiFi запросов для MikroTik
             try:
                 memory = load_memory()
@@ -931,11 +974,6 @@ async def ws_endpoint(websocket: WebSocket):
                 if not active:
                     active = memory.get("active_switch")
                 
-                config_fetched = False
-                config_data = ""
-                show_config_kw = ("покажи конфигураци", "покажи настройк", "текущая конфигураци", "покажи конфиг", "текущие настройк", "текущие параметры", "покажи конфигурацию", "покажи все настройки", "покажи текущую конфигураци", "покажи текущие настройк", "расскажи про конфигураци", "расскажи конфигураци", "прочитай конфигураци", "покажи конфигурацию устройства", "покажи конфиг устройства", "отобрази конфигураци", "выведи конфигураци", "напиши конфигураци", "напиши конфиг", "конфигураци", "кофигураци", "конфиг")
-                is_show_config = any(k in user_msg_lower for k in show_config_kw)
-
                 no_connect_kw = ("без подключения", "не подключайся", "не подключай", "только в базе", "только поиск", "pdf only", "search pdf", "в мануале", "в базе знаний", "поиск в базе", "найди в базе")
                 is_pdf_only = any(k in user_msg_lower for k in no_connect_kw)
 
@@ -990,108 +1028,115 @@ async def ws_endpoint(websocket: WebSocket):
                         print(f"✅ get_switch_config вернул данные (len={len(config_data)})", flush=True)
                 
                 if active:
-                    policy = memory.get("command_policies", {}).get("mikrotik", {})
-                    policy_info = ""
-                    if active.get("device_type", "").startswith("mikrotik"):
-                        readonly = policy.get("readonly_prefixes", [])
-                        blocked = policy.get("blocked_patterns", [])
-                        policy_info = f"\n[ПОЛИТИКА КОМАНД ДЛЯ MikroTik]:\n  Разрешённые: {', '.join(readonly[:8])}...\n  Заблокировано: {', '.join(blocked[:8])}...\n"
-                    
-                    if config_fetched:
-                        wifi_write_hint = ""
-                        if is_write and _is_mikrotik_wifi_write(user_msg_lower, active, is_write):
-                            wifi_params = _extract_wifi_params(user_msg)
-                            param_lines = []
-                            if "password" in wifi_params:
-                                param_lines.append(f"wpa-pre-shared-key={wifi_params['password']}")
-                            if "ssid" in wifi_params:
-                                param_lines.append(f"ssid={wifi_params['ssid']}")
-                            if "profile" in wifi_params:
-                                param_lines.append(f"security-profile={wifi_params['profile']}")
-                            if "mode" in wifi_params:
-                                param_lines.append(f"mode={wifi_params['mode']}")
-                            if "auth_type" in wifi_params:
-                                param_lines.append(f"authentication-types={wifi_params['auth_type']}")
-                            if "antenna_gain" in wifi_params:
-                                param_lines.append(f"antenna-gain={wifi_params['antenna_gain']}")
-                            params_hint = " ".join(param_lines)
-                            wifi_write_hint = (
-                                f"[ЗАДАЧА WiFi]:\n"
-                                f"ВНИМАНИЕ: ПАРАМЕТРЫ ИЗ СООБЩЕНИЯ ПОЛЬЗОВАТЕЛЯ — НЕ ИЗМЕНЯЙ ИХ:\n"
-                                f"  {params_hint}\n"
-                                f"План действий:\n"
-                                f"  1) Прочитай текущий конфиг выше и запомни текущие значения wlan и security-profile.\n"
-                                f"  2) Составь ПОЛНЫЙ план всех команд ДО их выполнения.\n"
-                                f"  3) Примени через apply_routeros_config (confirm=true) — ОТДЕЛЬНАЯ команда на каждую строку, не склеивай.\n"
-                                f"  4) Порядок: (a) security-profile: mode=dynamic-keys, authentication-types=wpa2-psk, wpa-pre-shared-key={wifi_params.get('password', '...')} (b) wireless: disabled=no, mode=ap-bridge, ssid={wifi_params.get('ssid', '...')}, security-profile={wifi_params.get('profile', 'default')}, antenna-gain={wifi_params.get('antenna_gain', '14')}.\n"
-                                f"  5) Проверь: /interface wireless security-profiles print detail — если authentication-types пустой или нет wpa2-psk, сеть будет БЕЗ пароля; исправь и проверь снова.\n"
-                                f"  6) Проверь: /interface wireless print detail — убедись что antenna-gain не 0 (0 = максимальное приглушение, 14 = минимальное затухание = максимальный сигнал).\n"
-                                f"  7) Кратко объясни пользователю что изменил и что показала проверка.\n"
-                                f"НЕ ИСПОЛЬЗУЙ ДРУГИЕ ЗНАЧЕНИЯ ПАРАМЕТРОВ КРОМЕ УКАЗАННЫХ ВЫШЕ!\n"
-                            )
-                        elif is_write:
-                            wifi_write_hint = (
-                                "[ЗАДАЧА: проанализируй конфиг, составь план, примени через apply_routeros_config (confirm=true). "
-                                "После изменений проверь результат read-командами.]\n"
-                            )
-                        else:
-                            wifi_write_hint = (
-                                "[ЗАДАЧА: АНАЛИЗИРУЙ ТОЛЬКО РЕАЛЬНУЮ КОНФИГУРАЦИЮ ВЫШЕ. НЕ СИМУЛИРУЙ.]\n"
-                            )
+                    if is_simple_read:
                         context_mem += (
-                            f"\n[АКТИВНЫЙ КОММУТАТОР — РАБОТАЙ ТОЛЬКО С НИМ]:\n"
-                            f"Имя: {active.get('name', active.get('ip'))} | IP: {active['ip']} | Тип: {active['device_type']} | "
-                            f"Пользователь: {active['username']} | Пароль: {active['password']}\n"
-                            f"{policy_info}\n"
-                            f"=== РЕАЛЬНАЯ КОНФИГУРАЦИЯ (ПОЛУЧЕНА ПО SSH) ===\n{config_data}\n=== КОНЕЦ КОНФИГУРАЦИИ ===\n"
-                            f"{wifi_write_hint}"
+                            f"\n[АКТИВНЫЙ КОММУТАТОР]: {active.get('name', active.get('ip'))} ({active['ip']}, {active['device_type']}). "
+                            f"У тебя есть инструменты для SSH: execute_routeros_command, get_switch_config, get_switch_logs. "
+                            f"Используй их для получения реальных данных. НЕ генерируй симуляции.\n"
                         )
                     else:
-                        dev_name = active.get('name', active.get('ip'))
-                        dev_ip = active['ip']
-                        if is_write:
-                            wifi_params_hint = ""
-                            if _is_mikrotik_wifi_write(user_msg_lower, active, is_write):
+                        policy = memory.get("command_policies", {}).get("mikrotik", {})
+                        policy_info = ""
+                        if active.get("device_type", "").startswith("mikrotik"):
+                            readonly = policy.get("readonly_prefixes", [])
+                            blocked = policy.get("blocked_patterns", [])
+                            policy_info = f"\n[ПОЛИТИКА КОМАНД ДЛЯ MikroTik]:\n  Разрешённые: {', '.join(readonly[:8])}...\n  Заблокировано: {', '.join(blocked[:8])}...\n"
+                        
+                        if config_fetched:
+                            wifi_write_hint = ""
+                            if is_write and _is_mikrotik_wifi_write(user_msg_lower, active, is_write):
                                 wifi_params = _extract_wifi_params(user_msg)
-                                param_parts = []
+                                param_lines = []
                                 if "password" in wifi_params:
-                                    param_parts.append(f"wpa-pre-shared-key={wifi_params['password']}")
+                                    param_lines.append(f"wpa-pre-shared-key={wifi_params['password']}")
                                 if "ssid" in wifi_params:
-                                    param_parts.append(f"ssid={wifi_params['ssid']}")
+                                    param_lines.append(f"ssid={wifi_params['ssid']}")
                                 if "profile" in wifi_params:
-                                    param_parts.append(f"security-profile={wifi_params['profile']}")
+                                    param_lines.append(f"security-profile={wifi_params['profile']}")
                                 if "mode" in wifi_params:
-                                    param_parts.append(f"mode={wifi_params['mode']}")
+                                    param_lines.append(f"mode={wifi_params['mode']}")
                                 if "auth_type" in wifi_params:
-                                    param_parts.append(f"authentication-types={wifi_params['auth_type']}")
+                                    param_lines.append(f"authentication-types={wifi_params['auth_type']}")
                                 if "antenna_gain" in wifi_params:
-                                    param_parts.append(f"antenna-gain={wifi_params['antenna_gain']}")
-                                if param_parts:
-                                    wifi_params_hint = (
-                                        f"\n[ПАРАМЕТРЫ WiFi ИЗ СООБЩЕНИЯ — НЕ ИЗМЕНЯЙ ИХ]:\n"
-                                        f"  {' '.join(param_parts)}\n"
-                                        f"План: 1) get_switch_config (wireless) 2) Составь план команд 3) Примени через apply_routeros_config (confirm=true) "
-                                        f"4) Проверь результат. НЕ выполняй команды без плана!"
-                                    )
+                                    param_lines.append(f"antenna-gain={wifi_params['antenna_gain']}")
+                                params_hint = " ".join(param_lines)
+                                wifi_write_hint = (
+                                    f"[ЗАДАЧА WiFi]:\n"
+                                    f"ВНИМАНИЕ: ПАРАМЕТРЫ ИЗ СООБЩЕНИЯ ПОЛЬЗОВАТЕЛЯ — НЕ ИЗМЕНЯЙ ИХ:\n"
+                                    f"  {params_hint}\n"
+                                    f"План действий:\n"
+                                    f"  1) Прочитай текущий конфиг выше и запомни текущие значения wlan и security-profile.\n"
+                                    f"  2) Составь ПОЛНЫЙ план всех команд ДО их выполнения.\n"
+                                    f"  3) Примени через apply_routeros_config (confirm=true) — ОТДЕЛЬНАЯ команда на каждую строку, не склеивай.\n"
+                                    f"  4) Порядок: (a) security-profile: mode=dynamic-keys, authentication-types=wpa2-psk, wpa-pre-shared-key={wifi_params.get('password', '...')} (b) wireless: disabled=no, mode=ap-bridge, ssid={wifi_params.get('ssid', '...')}, security-profile={wifi_params.get('profile', 'default')}, antenna-gain={wifi_params.get('antenna_gain', '14')}.\n"
+                                    f"  5) Проверь: /interface wireless security-profiles print detail — если authentication-types пустой или нет wpa2-psk, сеть будет БЕЗ пароля; исправь и проверь снова.\n"
+                                    f"  6) Проверь: /interface wireless print detail — убедись что antenna-gain не 0 (0 = максимальное приглушение, 14 = минимальное затухание = максимальный сигнал).\n"
+                                    f"  7) Кратко объясни пользователю что изменил и что показала проверка.\n"
+                                    f"НЕ ИСПОЛЬЗУЙ ДРУГИЕ ЗНАЧЕНИЯ ПАРАМЕТРОВ КРОМЕ УКАЗАННЫХ ВЫШЕ!\n"
+                                )
+                            elif is_write:
+                                wifi_write_hint = (
+                                    "[ЗАДАЧА: проанализируй конфиг, составь план, примени через apply_routeros_config (confirm=true). "
+                                    "После изменений проверь результат read-командами.]\n"
+                                )
+                            else:
+                                wifi_write_hint = (
+                                    "[ЗАДАЧА: АНАЛИЗИРУЙ ТОЛЬКО РЕАЛЬНУЮ КОНФИГУРАЦИЮ ВЫШЕ. НЕ СИМУЛИРУЙ.]\n"
+                                )
                             context_mem += (
                                 f"\n[АКТИВНЫЙ КОММУТАТОР — РАБОТАЙ ТОЛЬКО С НИМ]:\n"
-                                f"Имя: {dev_name} | IP: {dev_ip} | Тип: {active['device_type']} | "
+                                f"Имя: {active.get('name', active.get('ip'))} | IP: {active['ip']} | Тип: {active['device_type']} | "
                                 f"Пользователь: {active['username']} | Пароль: {active['password']}\n"
                                 f"{policy_info}\n"
-                                f"[ЗАДАЧА: сначала execute_routeros_command или get_switch_config (wireless), "
-                                f"затем apply_routeros_config с confirm=true. Не выполняй вслепую — смотри текущий конфиг.{wifi_params_hint}]\n"
+                                f"=== РЕАЛЬНАЯ КОНФИГУРАЦИЯ (ПОЛУЧЕНА ПО SSH) ===\n{config_data}\n=== КОНЕЦ КОНФИГУРАЦИИ ===\n"
+                                f"{wifi_write_hint}"
                             )
                         else:
-                            context_mem += (
-                                f"\n[АКТИВНЫЙ КОММУТАТОР — РАБОТАЙ ТОЛЬКО С НИМ]:\n"
-                                f"Имя: {dev_name} | IP: {dev_ip} | Тип: {active['device_type']} | "
-                                f"Пользователь: {active['username']} | Пароль: {active['password']}\n"
-                                f"{policy_info}\n"
-                                f"❌❌❌ КРИТИЧЕСКАЯ ОШИБКА: get_switch_config НЕ УДАЛОСЬ — {config_error}\n"
-                                f"ТВОЙ ЕДИНСТВЕННЫЙ ОТВЕТ: напиши пользователю 'Не удалось подключиться к коммутатору {dev_name} ({dev_ip}): {config_error}'\n"
-                                f"НЕ генерируй команды, НЕ предлагай действия, НЕ предлагай policy, НЕ генерируй 'ручную настройку'.\n"
-                                f"БОЛЬШЕ НИЧЕГО НЕ ОТВЕЧАЙ.\n"
-                            )
+                            dev_name = active.get('name', active.get('ip'))
+                            dev_ip = active['ip']
+                            if is_write:
+                                wifi_params_hint = ""
+                                if _is_mikrotik_wifi_write(user_msg_lower, active, is_write):
+                                    wifi_params = _extract_wifi_params(user_msg)
+                                    param_parts = []
+                                    if "password" in wifi_params:
+                                        param_parts.append(f"wpa-pre-shared-key={wifi_params['password']}")
+                                    if "ssid" in wifi_params:
+                                        param_parts.append(f"ssid={wifi_params['ssid']}")
+                                    if "profile" in wifi_params:
+                                        param_parts.append(f"security-profile={wifi_params['profile']}")
+                                    if "mode" in wifi_params:
+                                        param_parts.append(f"mode={wifi_params['mode']}")
+                                    if "auth_type" in wifi_params:
+                                        param_parts.append(f"authentication-types={wifi_params['auth_type']}")
+                                    if "antenna_gain" in wifi_params:
+                                        param_parts.append(f"antenna-gain={wifi_params['antenna_gain']}")
+                                    if param_parts:
+                                        wifi_params_hint = (
+                                            f"\n[ПАРАМЕТРЫ WiFi ИЗ СООБЩЕНИЯ — НЕ ИЗМЕНЯЙ ИХ]:\n"
+                                            f"  {' '.join(param_parts)}\n"
+                                            f"План: 1) get_switch_config (wireless) 2) Составь план команд 3) Примени через apply_routeros_config (confirm=true) "
+                                            f"4) Проверь результат. НЕ выполняй команды без плана!"
+                                        )
+                                context_mem += (
+                                    f"\n[АКТИВНЫЙ КОММУТАТОР — РАБОТАЙ ТОЛЬКО С НИМ]:\n"
+                                    f"Имя: {dev_name} | IP: {dev_ip} | Тип: {active['device_type']} | "
+                                    f"Пользователь: {active['username']} | Пароль: {active['password']}\n"
+                                    f"{policy_info}\n"
+                                    f"[ЗАДАЧА: сначала execute_routeros_command или get_switch_config (wireless), "
+                                    f"затем apply_routeros_config с confirm=true. Не выполняй вслепую — смотри текущий конфиг.{wifi_params_hint}]\n"
+                                )
+                            else:
+                                context_mem += (
+                                    f"\n[АКТИВНЫЙ КОММУТАТОР — РАБОТАЙ ТОЛЬКО С НИМ]:\n"
+                                    f"Имя: {dev_name} | IP: {dev_ip} | Тип: {active['device_type']} | "
+                                    f"Пользователь: {active['username']} | Пароль: {active['password']}\n"
+                                    f"{policy_info}\n"
+                                    f"❌❌❌ КРИТИЧЕСКАЯ ОШИБКА: get_switch_config НЕ УДАЛОСЬ — {config_error}\n"
+                                    f"ТВОЙ ЕДИНСТВЕННЫЙ ОТВЕТ: напиши пользователю 'Не удалось подключиться к коммутатору {dev_name} ({dev_ip}): {config_error}'\n"
+                                    f"НЕ генерируй команды, НЕ предлагай действия, НЕ предлагай policy, НЕ генерируй 'ручную настройку'.\n"
+                                    f"БОЛЬШЕ НИЧЕГО НЕ ОТВЕЧАЙ.\n"
+                                )
                 else:
                     context_mem += "\n[АКТИВНЫЙ КОММУТАТОР: не выбран. Если user просит подключиться — используй connect_switch с данными из сообщения.]\n"
 
@@ -1181,7 +1226,11 @@ async def ws_endpoint(websocket: WebSocket):
                                 HumanMessage(content=format_prompt)
                             ]),
                             max_retries=3,
-                            timeout=120.0
+                            timeout=120.0,
+                            fallback=lambda: llm_write.ainvoke([
+                                SystemMessage(content="Ты — старший сетевой инженер. Отвечай по-русски, используй таблицы где уместно."),
+                                HumanMessage(content=format_prompt)
+                            ])
                         )
                         direct_text = direct_result.content.strip() if isinstance(direct_result.content, str) else str(direct_result.content)
                         if direct_text and len(direct_text) > 20:
@@ -1204,10 +1253,12 @@ async def ws_endpoint(websocket: WebSocket):
                 async with agent_lock:
                     try:
                         agent_timeout = 180.0 if is_write else 90.0
+                        agent_fallback = None if is_write else lambda: create_agent(llm_write, agent_tools).ainvoke({"messages": messages})
                         result = await _retry_call(
                             lambda: active_agent.ainvoke({"messages": messages}),
                             max_retries=3,
-                            timeout=agent_timeout
+                            timeout=agent_timeout,
+                            fallback=agent_fallback
                         )
                     except asyncio.TimeoutError:
                         timeout_str = "180с" if is_write else "90с"
