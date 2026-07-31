@@ -19,6 +19,7 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import ChatOpenAI
 from langchain.agents import create_agent
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
+from langgraph.errors import GraphRecursionError
 from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
@@ -113,10 +114,60 @@ def _truncate_text(text: str, max_tokens: int) -> str:
     return text[:approx_chars] + "\n\n... (обрезано по токенам)"
 
 
-async def _retry_call(coro_factory, max_retries=3, timeout=180.0, fallback=None):
+def _extract_text(msg) -> str:
+    content = getattr(msg, "content", None)
+    text = ""
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        parts = []
+        for p in content:
+            if isinstance(p, dict):
+                if p.get("text"):
+                    parts.append(p["text"])
+            elif isinstance(p, str):
+                parts.append(p)
+        text = "\n".join(parts)
+    else:
+        text = str(content) if content else ""
+
+    text = text.strip()
+    if text:
+        return text
+
+    extra = getattr(msg, "additional_kwargs", {}) or {}
+    reasoning = extra.get("reasoning_content") or extra.get("reasoning")
+    if reasoning and isinstance(reasoning, str):
+        return reasoning.strip()
+
+    meta = getattr(msg, "response_metadata", {}) or {}
+    meta_text = meta.get("content") or meta.get("text") or meta.get("message")
+    if meta_text and isinstance(meta_text, str):
+        return meta_text.strip()
+
+    return ""
+
+
+async def _retry_call(coro_factory, max_retries=3, timeout=180.0, fallback=None, is_write=False):
     for attempt in range(max_retries):
         try:
             return await asyncio.wait_for(coro_factory(), timeout=timeout)
+        except GraphRecursionError as e:
+            print(f"🔄 Агент зациклился на вызовах инструментов (recursion limit), переключаюсь...", flush=True)
+            if fallback is not None:
+                try:
+                    return await asyncio.wait_for(fallback(), timeout=timeout)
+                except Exception as e2:
+                    raise Exception(f"Резервный LLM тоже не смог ответить: {e2}")
+            raise
+        except asyncio.TimeoutError as e:
+            if fallback is not None:
+                print(f"🔄 Таймаут Groq ({timeout}с), переключаюсь на NVIDIA...", flush=True)
+                try:
+                    return await asyncio.wait_for(fallback(), timeout=timeout)
+                except Exception as e2:
+                    raise Exception(f"Резервный LLM тоже не ответил за {timeout}с. Первый: {e}. Резервный: {e2}")
+            raise
         except Exception as e:
             err_str = str(e)
             is_rate_limit = (
@@ -126,31 +177,55 @@ async def _retry_call(coro_factory, max_retries=3, timeout=180.0, fallback=None)
                 "tokens per day" in err_str.lower() or
                 "Request too large" in err_str or
                 "TPD" in err_str or
-                "TPM" in err_str
+                "TPM" in err_str or
+                ("503" in err_str and "ResourceExhausted" in err_str) or
+                "resource_exhausted" in err_str.lower() or
+                "total request limit reached" in err_str.lower()
             )
-            if is_rate_limit and attempt < max_retries - 1:
-                wait = min(2 ** attempt, 10)
-                print(f"⏳ Rate limit/размер запроса (попытка {attempt+1}/{max_retries}), жду {wait}с...", flush=True)
-                await asyncio.sleep(wait)
-                continue
-            if is_rate_limit and fallback is not None:
-                print(f"🔄 Переключаюсь на резервный LLM (NVIDIA)...", flush=True)
-                try:
-                    return await asyncio.wait_for(fallback(), timeout=timeout)
-                except Exception as e2:
-                    err_str2 = str(e2)
-                    is_rate_limit2 = (
-                        "429" in err_str2 or
-                        "rate_limit" in err_str2.lower() or
-                        "tokens per minute" in err_str2.lower() or
-                        "tokens per day" in err_str2.lower() or
-                        "Request too large" in err_str2 or
-                        "TPD" in err_str2 or
-                        "TPM" in err_str2
-                    )
-                    if is_rate_limit2:
-                        raise Exception(f"Оба LLM исчерпали лимит. Первый: {err_str}. Резервный: {err_str2}")
-                    raise e2
+            if is_rate_limit:
+                is_daily_limit = "TPD" in err_str or "tokens per day" in err_str.lower()
+                is_nvidia_limit = "503" in err_str or "resource_exhausted" in err_str.lower() or "total request limit reached" in err_str.lower()
+                if is_daily_limit and fallback is not None:
+                    print(f"🔄 Дневной лимит Groq исчерпан, переключаюсь на NVIDIA...", flush=True)
+                    try:
+                        return await asyncio.wait_for(fallback(), timeout=timeout)
+                    except Exception as e2:
+                        raise Exception(f"Оба LLM недоступны. Groq: дневной лимит исчерпан. NVIDIA: {e2}")
+                if is_daily_limit and fallback is None:
+                    raise Exception(f"Groq дневной лимит исчерпан ({err_str}). Укажите NVIDIA API ключ.")
+                if is_nvidia_limit and fallback is None and attempt < max_retries - 1:
+                    wait = min(2 ** attempt * 2, 15)
+                    print(f"⏳ NVIDIA лимит исчерпан (попытка {attempt+1}/{max_retries}), жду {wait}с...", flush=True)
+                    await asyncio.sleep(wait)
+                    continue
+                if is_nvidia_limit and fallback is None:
+                    raise Exception(f"NVIDIA API временно недоступен (превышен лимит запросов). Попробуйте позже.")
+                if attempt < max_retries - 1:
+                    wait = min(2 ** attempt, 10)
+                    print(f"⏳ Rate limit/размер запроса (попытка {attempt+1}/{max_retries}), жду {wait}с...", flush=True)
+                    await asyncio.sleep(wait)
+                    continue
+                if fallback is not None:
+                    print(f"🔄 Переключаюсь на резервный LLM (NVIDIA)...", flush=True)
+                    try:
+                        return await asyncio.wait_for(fallback(), timeout=timeout)
+                    except Exception as e2:
+                        err_str2 = str(e2)
+                        is_rate_limit2 = (
+                            "429" in err_str2 or
+                            "rate_limit" in err_str2.lower() or
+                            "tokens per minute" in err_str2.lower() or
+                            "tokens per day" in err_str2.lower() or
+                            "Request too large" in err_str2 or
+                            "TPD" in err_str2 or
+                            "TPM" in err_str2 or
+                            ("503" in err_str2 and "ResourceExhausted" in err_str2) or
+                            "resource_exhausted" in err_str2.lower() or
+                            "total request limit reached" in err_str2.lower()
+                        )
+                        if is_rate_limit2:
+                            raise Exception(f"Оба LLM исчерпали лимиты. Первый: {err_str}. NVIDIA: {err_str2}")
+                        raise e2
             raise
 
 
@@ -629,6 +704,10 @@ tools = []
 mcp_client = None
 llm = None
 agent_lock = asyncio.Lock()
+MAX_AGENT_RECURSION_READ = 15
+MAX_AGENT_RECURSION_WRITE = 20
+MAX_AGENT_RECURSION_READ_FALLBACK = 15
+MAX_AGENT_RECURSION_WRITE_FALLBACK = 20
 
 def index_pdf_file(file_path: str):
     if not os.path.exists(file_path):
@@ -896,11 +975,11 @@ async def ws_endpoint(websocket: WebSocket):
             raw_data = await message_queue.get()
         except asyncio.CancelledError:
             return
-        
+
         if websocket.client_state != WebSocketState.CONNECTED:
             print("⚠️ WS disconnected, dropping message", flush=True)
             return
-        
+
         try:
             try:
                 req = ChatReq(**json.loads(raw_data))
@@ -1026,13 +1105,53 @@ async def ws_endpoint(websocket: WebSocket):
                         config_fetched = True
                         config_data = str(config_data)
                         print(f"✅ get_switch_config вернул данные (len={len(config_data)})", flush=True)
+                elif active and is_simple_read and not is_pdf_only and not config_fetched:
+                    print(f"🔧 АВТО-ЗАПРОС get_switch_config для simple_read {active.get('name', active.get('ip'))}", flush=True)
+                    config_data = _get_switch_config(
+                        active['ip'], active['username'], active['password'],
+                        active.get('device_type', 'zyxel_os')
+                    )
+                    if isinstance(config_data, dict):
+                        if config_data.get("ok"):
+                            config_fetched = True
+                            config_data = config_data.get("config", "Нет данных")
+                            print(f"✅ get_switch_config вернул данные (len={len(config_data)})", flush=True)
+                        else:
+                            config_error = config_data.get("error", "Неизвестная ошибка")
+                            print(f"❌ get_switch_config ошибка: {config_error}", flush=True)
+                    else:
+                        config_fetched = True
+                        config_data = str(config_data)
+                        print(f"✅ get_switch_config вернул данные (len={len(config_data)})", flush=True)
+                elif active and not is_write and not is_simple_read and not is_pdf_only and not config_fetched:
+                    print(f"🔧 АВТО-ЗАПРОС get_switch_config для read-запроса {active.get('name', active.get('ip'))}", flush=True)
+                    config_data = _get_switch_config(
+                        active['ip'], active['username'], active['password'],
+                        active.get('device_type', 'zyxel_os')
+                    )
+                    if isinstance(config_data, dict):
+                        if config_data.get("ok"):
+                            config_fetched = True
+                            config_data = config_data.get("config", "Нет данных")
+                            print(f"✅ get_switch_config вернул данные (len={len(config_data)})", flush=True)
+                        else:
+                            config_error = config_data.get("error", "Неизвестная ошибка")
+                            print(f"❌ get_switch_config ошибка: {config_error}", flush=True)
+                    else:
+                        config_fetched = True
+                        config_data = str(config_data)
+                        print(f"✅ get_switch_config вернул данные (len={len(config_data)})", flush=True)
                 
                 if active:
                     if is_simple_read:
+                        dev_name = active.get('name', active.get('ip'))
+                        dev_ip = active['ip']
                         context_mem += (
-                            f"\n[АКТИВНЫЙ КОММУТАТОР]: {active.get('name', active.get('ip'))} ({active['ip']}, {active['device_type']}). "
+                            f"\n[АКТИВНЫЙ КОММУТАТОР — РАБОТАЙ ТОЛЬКО С НИМ]:\n"
+                            f"Имя: {dev_name} | IP: {dev_ip} | Тип: {active['device_type']} | "
+                            f"Пользователь: {active['username']} | Пароль: {active['password']}\n"
                             f"У тебя есть инструменты для SSH: execute_routeros_command, get_switch_config, get_switch_logs. "
-                            f"Используй их для получения реальных данных. НЕ генерируй симуляции.\n"
+                            f"Используй их для реальных данных. НЕ генерируй симуляции.\n"
                         )
                     else:
                         policy = memory.get("command_policies", {}).get("mikrotik", {})
@@ -1227,6 +1346,7 @@ async def ws_endpoint(websocket: WebSocket):
                             ]),
                             max_retries=3,
                             timeout=120.0,
+                            is_write=is_write,
                             fallback=lambda: llm_write.ainvoke([
                                 SystemMessage(content="Ты — старший сетевой инженер. Отвечай по-русски, используй таблицы где уместно."),
                                 HumanMessage(content=format_prompt)
@@ -1243,6 +1363,56 @@ async def ws_endpoint(websocket: WebSocket):
                         final_response = f"📋 Конфигурация устройства {dev_name}:\n\n{config_data}"
                     raise _SkipAgent(final_response)
 
+                if config_error:
+                    if is_simple_read:
+                        final_response = f"❌ Не удалось подключиться к коммутатору {active.get('name', active.get('ip'))}: {config_error}\n\nПопробуй позже или проверь доступность устройства по SSH."
+                        raise _SkipAgent(final_response)
+
+                # Для простых read-запросов с уже полученным конфигом — пропускаем агент
+                # и сразу форматируем ответ через прямой LLM вызов (быстрее, без цикла инструментов)
+                if config_fetched and is_simple_read:
+                    dev_name = active.get('name', active.get('ip')) if active else "устройства"
+                    # Авто-фetch данных подключений для запросов про connections/established
+                    extra_data = ""
+                    if any(k in user_msg_lower for k in ("established", "подключен", "connection", "conntrack", "активн", "текущ")):
+                        print(f"🔧 Авто-запрос /ip firewall connection print для simple_read", flush=True)
+                        conn_result = await _execute_routeros_commands(active, ["/ip firewall connection print"])
+                        if conn_result and "bad command" not in conn_result.lower():
+                            extra_data = f"\n\n=== ДАННЫЕ АКТИВНЫХ ПОДКЛЮЧЕНИЙ (/ip firewall connection print) ===\n{conn_result}\n=== КОНЕЦ ДАННЫХ ==="
+                            print(f"✅ /ip firewall connection print вернул данные (len={len(conn_result)})", flush=True)
+                    direct_prompt = (
+                        f"Пользователь спрашивает про подключения (established). "
+                        f"Вот конфигурация устройства {dev_name}, полученная по SSH:\n\n"
+                        f"{config_data}{extra_data}\n\n"
+                        f"Если данные подключений есть выше — дай краткий ответ на русском: сколько активных (established) подключений, "
+                        f"к каким IP-адресам они подключены, по каким портам/протоколам. Оформи ответ таблицей если данных много. "
+                        f"Если данных подключений нет — сообщи пользователю команду для их получения: /ip firewall connection print detail\n"
+                        f"Не выдумывай данные, отвечай только на основе реальных данных выше."
+                    )
+                    try:
+                        direct_result = await _retry_call(
+                            lambda: current_llm.ainvoke([
+                                SystemMessage(content="Ты — старший сетевой инженер. Отвечай по-русски, кратко и по делу.").content,
+                                HumanMessage(content=direct_prompt)
+                            ]),
+                            max_retries=2,
+                            timeout=60.0,
+                            is_write=False,
+                            fallback=lambda: llm_write.ainvoke([
+                                SystemMessage(content="Ты — старший сетевой инженер. Отвечай по-русски, кратко.").content,
+                                HumanMessage(content=direct_prompt)
+                            ])
+                        )
+                        direct_text = direct_result.content.strip() if isinstance(direct_result.content, str) else str(direct_result.content)
+                        if direct_text and len(direct_text) > 5:
+                            final_response = direct_text
+                        else:
+                            final_response = f"📋 Конфигурация устройства {dev_name}:\n\n{config_data}"
+                    except Exception as e:
+                        print(f"⚠️ Прямой LLM вызов для simple_read не удался: {e}", flush=True)
+                        final_response = f"📋 Конфигурация устройства {dev_name}:\n\n{config_data}"
+                    raise _SkipAgent(final_response)
+
                 # Создаём агента с актуальным набором инструментов для этого запроса
                 if len(agent_tools) == len(tools) and current_llm is llm:
                     active_agent = agent
@@ -1253,11 +1423,42 @@ async def ws_endpoint(websocket: WebSocket):
                 async with agent_lock:
                     try:
                         agent_timeout = 180.0 if is_write else 90.0
-                        agent_fallback = None if is_write else lambda: create_agent(llm_write, agent_tools).ainvoke({"messages": messages})
+                        recursion_limit = MAX_AGENT_RECURSION_WRITE if is_write else MAX_AGENT_RECURSION_READ
+                        agent_with_config = active_agent.with_config({"recursion_limit": recursion_limit})
+                        fallback_recursion = MAX_AGENT_RECURSION_WRITE_FALLBACK if is_write else MAX_AGENT_RECURSION_READ_FALLBACK
+                        if is_write:
+                            agent_fallback = None
+                        elif is_simple_read and config_fetched:
+                            # For simple_read with config already fetched, NVIDIA fallback uses direct LLM (no agent loop)
+                            agent_fallback = lambda: llm_write.ainvoke([
+                                SystemMessage(content="Ты — старший сетевой инженер. Отвечай по-русски, кратко и по делу на основе данных ниже.").content,
+                                HumanMessage(content=(
+                                    f"Пользователь спрашивает про подключения (established). "
+                                    f"Вот конфигурация устройства, полученная по SSH:\n\n"
+                                    f"{config_data}\n\n"
+                                    f"Дай краткий ответ на русском. Не выдумывай данные. "
+                                    f"Если данные подключений отсутствуют — скажи об этом."
+                                ))
+                            ])
+                        else:
+                            # For read requests (non-simple_read), NVIDIA fallback also uses direct LLM since no write tools needed
+                            system_msg = "Ты — старший сетевой инженер. Проанализируй предоставленные данные и дай краткий ответ по-русски."
+                            human_msg = (
+                                f"Пользователь задал вопрос: '{user_msg}'.\n\n"
+                                f"Вот данные, полученные по SSH от устройства {active.get('name', active.get('ip')) if active else 'устройства'}:\n\n"
+                                f"{config_data if config_fetched else 'Данные устройства не получены.'}\n\n"
+                                f"Проанализируй и дай краткий ответ. Не выдумывай данные. "
+                                f"Если данных недостаточно для ответа — скажи об этом."
+                            )
+                            agent_fallback = lambda: llm_write.ainvoke([
+                                SystemMessage(content=system_msg),
+                                HumanMessage(content=human_msg)
+                            ])
                         result = await _retry_call(
-                            lambda: active_agent.ainvoke({"messages": messages}),
+                            lambda: agent_with_config.ainvoke({"messages": messages}),
                             max_retries=3,
                             timeout=agent_timeout,
+                            is_write=is_write,
                             fallback=agent_fallback
                         )
                     except asyncio.TimeoutError:
@@ -1280,7 +1481,8 @@ async def ws_endpoint(websocket: WebSocket):
                                         "Не добавляй пояснения."
                                     ))]),
                                     max_retries=3,
-                                    timeout=180.0
+                                    timeout=180.0,
+                                    is_write=True
                                 )
                                 text = _extract_text(response)
                                 commands = _extract_routeros_commands(text)
@@ -1292,43 +1494,30 @@ async def ws_endpoint(websocket: WebSocket):
                             except Exception as e2:
                                 final_response = f"❌ Fallback LLM ошибка: {_format_api_error(e2)}"
                             raise _SkipAgent(final_response)
-                        raise
+                        if isinstance(e, GraphRecursionError):
+                            print(f"🔄 Агент (основной и fallback) зациклился, возвращаю конфиг напрямую", flush=True)
+                            if config_fetched and config_data:
+                                final_response = f"📋 Конфигурация устройства {active.get('name', active.get('ip'))}:\n\n{config_data}"
+                            elif is_simple_read:
+                                final_response = f"⚠️ Модель зациклилась на вызовах инструментов. Устройство {active.get('name', active.get('ip'))} недоступно или не отвечает корректно."
+                            else:
+                                final_response = f"⚠️ Агент зациклился на вызовах инструментов и не смог ответить."
+                        else:
+                            raise
+                        raise _SkipAgent(final_response)
 
-                def _msg_to_text(msg):
-                    """Извлекает текст из сообщения, включая reasoning_content для nemotron."""
-                    content = getattr(msg, "content", None)
-                    text = ""
-                    if isinstance(content, str):
-                        text = content
-                    elif isinstance(content, list):
-                        parts = []
-                        for p in content:
-                            if isinstance(p, dict):
-                                if p.get("text"):
-                                    parts.append(p["text"])
-                            elif isinstance(p, str):
-                                parts.append(p)
-                        text = "\n".join(parts)
-                    else:
-                        text = str(content) if content else ""
-
-                    text = text.strip()
-                    if text:
-                        return text
-
-                    # Если content пустой — пробуем reasoning_content (nemotron reasoning модели)
-                    extra = getattr(msg, "additional_kwargs", {}) or {}
-                    reasoning = extra.get("reasoning_content") or extra.get("reasoning")
-                    if reasoning and isinstance(reasoning, str):
-                        return reasoning.strip()
-
-                    # Если и это пусто — пробуем response_metadata (некоторые API возвращают туда текст)
-                    meta = getattr(msg, "response_metadata", {}) or {}
-                    meta_text = meta.get("content") or meta.get("text") or meta.get("message")
-                    if meta_text and isinstance(meta_text, str):
-                        return meta_text.strip()
-
-                    return ""
+                # NVIDIA fallback вернул AIMessage напрямую — использовать его текст как финальный ответ
+                if isinstance(result, AIMessage):
+                    ai_text = _extract_text(result)
+                    if not ai_text or len(ai_text) < 5:
+                        ai_text = None
+                    if ai_text:
+                        final_response = ai_text.strip()
+                        print(f"📤 Финальный ответ (NVIDIA fallback): {len(final_response)} символов", flush=True)
+                        raise _SkipAgent(final_response)
+                    # Если NVIDIA вернул пустой ответ — показать raw данные
+                    final_response = f"📋 Конфигурация устройства {active.get('name', active.get('ip'))}:\n\n{config_data}" if config_fetched and config_data else "⚠️ Модель не смогла ответить."
+                    raise _SkipAgent(final_response)
 
                 result_messages = result.get("messages", [])
                 new_messages = result_messages[input_messages_count:] or result_messages[-1:]
@@ -1339,7 +1528,7 @@ async def ws_endpoint(websocket: WebSocket):
                 tool_text = ""
                 for msg in reversed(new_messages):
                     msg_type = type(msg).__name__
-                    txt = _msg_to_text(msg)
+                    txt = _extract_text(msg)
                     if msg_type == "ToolMessage":
                         if txt.startswith("❌") or txt.startswith("ОШИБКА"):
                             if not tool_error:
